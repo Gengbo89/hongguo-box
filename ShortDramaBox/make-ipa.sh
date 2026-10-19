@@ -5,7 +5,14 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"      # .../ShortDramaBox
 ROOT="$(dirname "$HERE")"
+# 记录调用时的目录：入参若为相对路径，必须按调用目录解析，
+# 否则会在打包阶段的临时目录里生成 IPA，随后被删掉。
+START_PWD="$PWD"
 OUT="${1:-$ROOT/ShortDramaBox-unsigned.ipa}"
+case "$OUT" in
+  /*) ;;
+  *) OUT="$START_PWD/$OUT" ;;
+esac
 DD="$ROOT/build-dd"
 
 cd "$HERE"
