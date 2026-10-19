@@ -11,6 +11,17 @@ DD="$ROOT/build-dd"
 cd "$HERE"
 if command -v xcodegen >/dev/null; then xcodegen generate >/dev/null; fi
 
+# xcodegen 2.46 会写出 objectVersion=77（Xcode 16 格式），
+# 而 CI 的 macos-14 runner 默认是 Xcode 15.4，读不了新格式。
+# 本工程只用了经典节区，没有 Xcode 16 专有构造，降级到 56 是安全的。
+PBX="ShortDramaBox.xcodeproj/project.pbxproj"
+if [ -f "$PBX" ] && grep -q "objectVersion = 77" "$PBX"; then
+  sed -i.bak 's/objectVersion = 77;/objectVersion = 56;/' "$PBX"
+  sed -i.bak '/preferredProjectObjectVersion = 77;/d' "$PBX"
+  rm -f "$PBX.bak"
+  echo "==> 已把工程格式从 77 降到 56（兼容 Xcode 15.4）"
+fi
+
 echo "==> 编译（未签名 Release）"
 xcodebuild \
   -project ShortDramaBox.xcodeproj \
