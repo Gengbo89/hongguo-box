@@ -47,7 +47,7 @@ jobs:
           fi
           exit $code
 
-      - name: 确认产物并生成清单
+      - name: 生成清单
         if: success()
         run: |
           ls -la ShortDramaBox-unsigned.ipa
@@ -70,6 +70,8 @@ jobs:
             ls -la "$APP/ShortDramaBox" 2>/dev/null || true
             file "$APP/ShortDramaBox" 2>/dev/null || true
             lipo -info "$APP/ShortDramaBox" 2>/dev/null || true
+            echo "--- SHA256 ---"
+            shasum -a 256 ShortDramaBox-unsigned.ipa
           } > ipa-manifest.txt
           cat ipa-manifest.txt
           git config user.email "ci@users.noreply.github.com"
@@ -79,7 +81,7 @@ jobs:
           git pull --rebase -q origin main || true
           git push || true
 
-      - name: 上传产物
+      - name: 上传 Actions 产物
         if: success()
         uses: actions/upload-artifact@v4
         with:
@@ -87,3 +89,21 @@ jobs:
           path: ShortDramaBox-unsigned.ipa
           if-no-files-found: error
           retention-days: 30
+
+      # Release 资源在公开仓库里可免登录直接下载，方便侧载
+      - name: 发布到 Release
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="build-${GITHUB_RUN_NUMBER}"
+          NOTES="未签名 IPA，用 Sideloadly + 免费 Apple ID 安装。
+          
+          安装：下载下面的 ShortDramaBox-unsigned.ipa，拖进 Sideloadly，填入 Apple ID，Start。
+          装完在 iPhone 的「设置 → 通用 → VPN 与设备管理」里信任证书。
+          免费账号签名 7 天过期，重跑一次 Sideloadly 续期即可，数据不丢。"
+          gh release create "$TAG" ShortDramaBox-unsigned.ipa \
+            --title "短剧盒子 iOS 测试版 build ${GITHUB_RUN_NUMBER}" \
+            --notes "$NOTES" \
+            --latest || echo "发布失败（可能已存在）"
+          gh release list | head -3
