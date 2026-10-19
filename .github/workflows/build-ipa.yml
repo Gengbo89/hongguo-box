@@ -1,11 +1,12 @@
-# 用法：把本文件复制到仓库的 .github/workflows/build-ipa.yml
-# macOS runner 自带 Xcode + iOS SDK，因此本机无需安装 Xcode。
 name: Build unsigned IPA
 
 on:
   push:
     branches: [ main, master ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   ipa:
@@ -17,14 +18,36 @@ jobs:
         run: |
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
+          swift --version
+          sw_vers
 
       - name: 安装 xcodegen
         run: brew install xcodegen
 
       - name: 打包未签名 IPA
-        run: ./ShortDramaBox/make-ipa.sh ShortDramaBox-unsigned.ipa
+        run: |
+          set +e
+          ./ShortDramaBox/make-ipa.sh ShortDramaBox-unsigned.ipa > /tmp/build.log 2>&1
+          code=$?
+          echo "exit=$code"
+          if [ $code -ne 0 ]; then
+            {
+              echo "=== 构建失败 exit=$code ==="
+              echo "--- 最后 400 行 ---"
+              tail -400 /tmp/build.log
+              echo "--- 其中的 error/警告行 ---"
+              grep -nE "error:|fatal error|Error Domain|The following build commands failed|Command .* failed|undefined symbol|cannot find|No such file" /tmp/build.log | head -80
+            } > build-error.log
+            git config user.email "ci@users.noreply.github.com"
+            git config user.name "ci"
+            git add -f build-error.log
+            git commit -q -m "ci: build error log [skip ci]" || true
+            git push || true
+          fi
+          exit $code
 
       - name: 上传产物
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ShortDramaBox-unsigned-ipa
