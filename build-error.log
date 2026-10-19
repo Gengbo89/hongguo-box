@@ -1,0 +1,24 @@
+=== 构建失败 exit=74 ===
+--- 最后 400 行 ---
+==> 编译（未签名 Release）
+Command line invocation:
+    /Applications/Xcode_15.4.app/Contents/Developer/usr/bin/xcodebuild -project ShortDramaBox.xcodeproj -scheme ShortDramaBox -sdk iphoneos -configuration Release -derivedDataPath /Users/runner/work/hongguo-box/hongguo-box/build-dd CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= CODE_SIGN_ENTITLEMENTS= build
+
+User defaults from command line:
+    IDEDerivedDataPathOverride = /Users/runner/work/hongguo-box/hongguo-box/build-dd
+    IDEPackageSupportUseBuiltinSCM = YES
+
+Build settings from command line:
+    CODE_SIGN_ENTITLEMENTS = 
+    CODE_SIGN_IDENTITY = 
+    CODE_SIGNING_ALLOWED = NO
+    CODE_SIGNING_REQUIRED = NO
+    SDKROOT = iphoneos17.5
+
+2026-10-19 10:29:22.907 xcodebuild[1718:7530] Writing error result bundle to /var/folders/s6/5hzmn6lx4dz5nxs7k_0slzph0000gn/T/ResultBundle_2026-19-10_10-29-0022.xcresult
+xcodebuild: error: Unable to read project 'ShortDramaBox.xcodeproj'.
+	Reason: The project ‘ShortDramaBox’ cannot be opened because it is in a future Xcode project file format (77). Adjust the project format using a compatible version of Xcode to allow it to be opened by this version of Xcode.
+
+
+--- 其中的 error/警告行 ---
+17:xcodebuild: error: Unable to read project 'ShortDramaBox.xcodeproj'.
