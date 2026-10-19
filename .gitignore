@@ -1,0 +1,5 @@
+build-dd/
+*.ipa
+hg2
+shot-*.png
+.DS_Store

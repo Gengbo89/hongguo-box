@@ -1,0 +1,33 @@
+# 用法：把本文件复制到仓库的 .github/workflows/build-ipa.yml
+# macOS runner 自带 Xcode + iOS SDK，因此本机无需安装 Xcode。
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  ipa:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 显示工具链
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: 安装 xcodegen
+        run: brew install xcodegen
+
+      - name: 打包未签名 IPA
+        run: ./ShortDramaBox/make-ipa.sh ShortDramaBox-unsigned.ipa
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShortDramaBox-unsigned-ipa
+          path: ShortDramaBox-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
