@@ -35,16 +35,49 @@ jobs:
               echo "=== 构建失败 exit=$code ==="
               echo "--- 最后 400 行 ---"
               tail -400 /tmp/build.log
-              echo "--- 其中的 error/警告行 ---"
-              grep -nE "error:|fatal error|Error Domain|The following build commands failed|Command .* failed|undefined symbol|cannot find|No such file" /tmp/build.log | head -80
+              echo "--- error 行 ---"
+              grep -nE "error:|fatal error|The following build commands failed|undefined symbol|cannot find|No such file" /tmp/build.log | head -80
             } > build-error.log
             git config user.email "ci@users.noreply.github.com"
             git config user.name "ci"
             git add -f build-error.log
             git commit -q -m "ci: build error log [skip ci]" || true
+            git pull --rebase -q origin main || true
             git push || true
           fi
           exit $code
+
+      - name: 确认产物并生成清单
+        if: success()
+        run: |
+          ls -la ShortDramaBox-unsigned.ipa
+          {
+            echo "构建 #${GITHUB_RUN_NUMBER}  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "commit: ${GITHUB_SHA}"
+            echo "IPA 字节数: $(stat -f%z ShortDramaBox-unsigned.ipa)"
+            echo "--- IPA 内容 ---"
+            unzip -l ShortDramaBox-unsigned.ipa
+            rm -rf /tmp/ck && mkdir -p /tmp/ck
+            unzip -q ShortDramaBox-unsigned.ipa -d /tmp/ck
+            APP=$(find /tmp/ck/Payload -maxdepth 1 -name '*.app' | head -1)
+            echo "app: $APP"
+            echo "--- Info.plist ---"
+            /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APP/Info.plist" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP/Info.plist" 2>/dev/null || true
+            echo "--- 可执行文件 ---"
+            ls -la "$APP/ShortDramaBox" 2>/dev/null || true
+            file "$APP/ShortDramaBox" 2>/dev/null || true
+            lipo -info "$APP/ShortDramaBox" 2>/dev/null || true
+          } > ipa-manifest.txt
+          cat ipa-manifest.txt
+          git config user.email "ci@users.noreply.github.com"
+          git config user.name "ci"
+          git add -f ipa-manifest.txt
+          git commit -q -m "ci: IPA 清单 [skip ci]" || true
+          git pull --rebase -q origin main || true
+          git push || true
 
       - name: 上传产物
         if: success()
