@@ -70,11 +70,14 @@ enum Transcoder {
             .appendingPathComponent("\(stem).\(rendition.rawValue).mp4")
     }
 
-    /// 已转好且非空则返回缓存路径
+    /// 已转好且非空则返回缓存路径。
+    /// 命中时刷新访问时间 —— 转码结果重建代价高，让它排在 LRU 淘汰的后面。
     static func cached(for source: URL, rendition: Rendition) -> URL? {
         let url = outputURL(for: source, rendition: rendition)
         guard let a = try? FileManager.default.attributesOfItem(atPath: url.path),
               let n = a[.size] as? NSNumber, n.intValue > 0 else { return nil }
+        try? FileManager.default.setAttributes([.modificationDate: Date()],
+                                              ofItemAtPath: url.path)
         return url
     }
 
