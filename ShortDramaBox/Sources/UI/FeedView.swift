@@ -163,17 +163,18 @@ final class FeedModel: ObservableObject {
         }
         items[i].episode = ep
 
-        // 取流
-        let tracks = await PlayerAPI.tracks(for: ep.vid)
+        // 取流：全部档位都要，播不了的留给本机转码
+        let tracks = await PlayerAPI.allTracks(for: ep.vid)
         guard let best = Self.pick(tracks) else {
             setStatus(i, .failed("无可用清晰度")); return
         }
         guard items.indices.contains(i) else { return }
         items[i].track = best
 
-        // 下载 + 解密
+        // 下载 + 解密（必要时本机转码）
         do {
-            let url = try await MediaStore.prepare(vid: ep.vid, track: best) { p in
+            let url = try await MediaStore.prepareForPlayback(
+                vid: ep.vid, track: best, pool: tracks) { p in
                 Task { @MainActor in self.setStatus(i, .downloading(p)) }
             }
             guard items.indices.contains(i) else { return }
@@ -183,12 +184,13 @@ final class FeedModel: ObservableObject {
         }
     }
 
-    /// 优先 1080p，否则可用的最高档
+    /// 选档：优先能直接播的 1080p；一条都直接播不了就挑最高档走本机转码。
+    /// 传入的 tracks 已按清晰度从高到低排好，一条都不过滤。
     static func pick(_ tracks: [VideoTrack]) -> VideoTrack? {
-        let ok = tracks.filter { PlayerAPI.isPlayableCodec($0.codec) }
+        let ok = PlayerAPI.playable(tracks)
         let list = ok.isEmpty ? tracks : ok
-        if let p = list.last(where: { $0.definition.contains("1080") }) { return p }
-        return list.last
+        if let p = list.first(where: { $0.definition.contains("1080") }) { return p }
+        return list.first
     }
 
     private func setStatus(_ i: Int, _ s: FeedItem.Status) {
