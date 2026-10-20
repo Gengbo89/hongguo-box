@@ -1,52 +1,50 @@
 import SwiftUI
 
-/// 搜索 = 站内服务端搜索（`/search/<关键词>`，按站方相关度排序）＋ 本地索引兜底。
-/// 本地索引只有千余部，站内搜索覆盖全库，两者合并去重后才不会"很多都搜不到"。
-/// 同名各季是独立剧集（标题带「第N季」），站内搜索会把它们一起返回。
+/// 搜索 = 内置全库索引（约 58.8 万部）＋ 站内服务端搜索（按站方相关度排序）。
+///
+/// 为什么要两份：站内搜索只覆盖它自己的索引，实测拿全库随机片名去搜，
+/// 精确命中率只有约 50%（冷门老剧基本搜不到）；内置索引覆盖 99.96%，
+/// 但它是"片名包含"匹配，没有站方的相关度。两者合并去重才既不漏又好找。
+///
+/// 同名各季是独立剧集（标题带「第N季」），两边都会把它们一起返回。
 struct SearchView: View {
     @State private var q = ""
-    @State private var pool: [Series] = []
-    @State private var loading = true
-    @State private var progressText = "准备中…"
-    @State private var seen = Set<String>()
 
-    @State private var remote: [Series] = []      // 站内搜索结果
+    // 内置索引
+    @State private var local: [Series] = []
+    @State private var localTotal = 0
+    @State private var indexCount = 0
+    @State private var indexReady = false
+    @State private var loadingIndex = true
+    @State private var localTask: Task<Void, Never>?
+
+    // 站内搜索
+    @State private var remote: [Series] = []
     @State private var remoteTotal = 0
     @State private var remoteNote = ""
+    @State private var remoteBusy = false
     @State private var remoteTask: Task<Void, Never>?
 
+    private var keyword: String { q.trimmingCharacters(in: .whitespaces) }
+
     private var results: [Series] {
-        let k = q.trimmingCharacters(in: .whitespaces)
+        let k = keyword
         guard !k.isEmpty else { return [] }
         var out: [Series] = []
         var ids = Set<String>()
+        // 站内结果按站方相关度在前，内置索引补充在后
         for s in remote where ids.insert(s.id).inserted { out.append(s) }
-        for s in pool where s.title.localizedCaseInsensitiveContains(k) && ids.insert(s.id).inserted {
-            out.append(s)
-        }
+        for s in local where ids.insert(s.id).inserted { out.append(s) }
         return out
     }
 
     var body: some View {
         NavigationStack {
             Group {
-                if q.trimmingCharacters(in: .whitespaces).isEmpty {
-                    if loading && pool.isEmpty {
-                        VStack(spacing: 12) {
-                            ProgressView()
-                            Text(progressText).font(.system(size: 13)).foregroundStyle(.secondary)
-                        }
-                    } else {
-                        CompatUnavailable("搜索短剧", systemImage: "magnifyingglass",
-                                          desc: "输入片名，直接搜站内全库\n本地已索引 \(pool.count) 部作为补充")
-                    }
+                if keyword.isEmpty {
+                    emptyState
                 } else if results.isEmpty {
-                    VStack(spacing: 10) {
-                        if remoteNote.isEmpty { ProgressView() }
-                        Text(remoteNote.isEmpty ? "正在搜索…" : remoteNote)
-                            .font(.system(size: 12)).foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center).padding(.horizontal)
-                    }
+                    searchingState
                 } else {
                     ScrollView {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 10)], spacing: 14) {
@@ -61,82 +59,116 @@ struct SearchView: View {
             }
             .navigationTitle("搜索")
             .searchable(text: $q, prompt: "输入片名")
-            .onChange(of: q) { v in scheduleRemote(v) }
-            .task { await runIndex() }
+            .onChange(of: q) { v in schedule(v) }
+            .task { await warmUp() }
+        }
+    }
+
+    // MARK: - 各状态视图
+
+    private var emptyState: some View {
+        VStack(spacing: 12) {
+            if loadingIndex {
+                ProgressView()
+                Text("正在装载内置全库索引…")
+                    .font(.system(size: 13)).foregroundStyle(.secondary)
+            } else {
+                CompatUnavailable(
+                    "搜索短剧", systemImage: "magnifyingglass",
+                    desc: indexReady
+                        ? "输入片名，在 \(indexCount) 部里搜索\n同时也会去站内再找一遍"
+                        : "输入片名搜索站内\n（内置索引未能载入）")
+            }
+        }
+    }
+
+    private var searchingState: some View {
+        VStack(spacing: 10) {
+            if remoteBusy || localTask != nil { ProgressView() }
+            Text(remoteBusy || localTask != nil ? "正在搜索…" : "没有找到「\(keyword)」")
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center).padding(.horizontal)
         }
     }
 
     private var noteBar: some View {
         VStack(spacing: 2) {
+            Text(summary).font(.system(size: 11)).foregroundStyle(.secondary)
             if !remoteNote.isEmpty {
-                Text(remoteNote).font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-            if loading {
-                Text(progressText).font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(remoteNote).font(.system(size: 10)).foregroundStyle(.tertiary)
             }
         }
         .frame(maxWidth: .infinity).padding(.vertical, 5)
         .background(.ultraThinMaterial)
     }
 
-    private func add(_ list: [Series]) {
-        for s in list where !s.id.isEmpty && seen.insert(s.id).inserted { pool.append(s) }
+    private var summary: String {
+        var parts: [String] = []
+        if localTotal > 0 {
+            parts.append("内置索引命中 \(localTotal) 部")
+            if local.count < localTotal { parts.append("显示前 \(local.count) 部") }
+        }
+        if remoteTotal > 0 { parts.append("站内命中 \(remoteTotal) 部") }
+        if parts.isEmpty { return remoteBusy ? "正在搜索…" : "没有找到" }
+        return parts.joined(separator: " · ")
     }
 
-    /// 输入停顿 300ms 后请求站内搜索，避免逐字打字打爆接口
+    // MARK: - 搜索调度
+
+    /// 输入停顿 260ms 后再动手：内置索引是本地扫描，站内是网络请求
     @MainActor
-    private func scheduleRemote(_ raw: String) {
+    private func schedule(_ raw: String) {
         remoteTask?.cancel()
+        localTask?.cancel()
         let key = raw.trimmingCharacters(in: .whitespaces)
         guard !key.isEmpty else {
-            remote = []; remoteTotal = 0; remoteNote = ""; return
+            local = []; localTotal = 0; remote = []; remoteTotal = 0; remoteNote = ""; remoteBusy = false
+            return
         }
-        remoteNote = ""
+        local = []; localTotal = 0; remote = []; remoteTotal = 0; remoteNote = ""; remoteBusy = false
+
+        localTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 260_000_000)
+            guard !Task.isCancelled else { return }
+            let r = await Task.detached(priority: .userInitiated) {
+                LocalIndex.shared.search(key, limit: 300)
+            }.value
+            guard !Task.isCancelled, key == keyword else { return }
+            local = r.list
+            localTotal = r.total
+            localTask = nil
+        }
+
+        remoteBusy = true
         remoteTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 300_000_000)
+            try? await Task.sleep(nanoseconds: 260_000_000)
             guard !Task.isCancelled else { return }
             do {
                 let p = try await SearchAPI.remote(key)
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, key == keyword else { return }
                 remote = p.list
                 remoteTotal = p.total
-                let extra = results.count - p.list.count
-                remoteNote = "站内命中 \(p.total) 部" + (extra > 0 ? " · 本地索引补充 \(extra) 部" : "")
             } catch {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, key == keyword else { return }
                 remote = []; remoteTotal = 0
-                remoteNote = "站内搜索失败，仅用本地索引"
+                remoteNote = "站内搜索没通，只用了内置索引"
             }
+            remoteBusy = false
         }
     }
 
-    private func runIndex() async {
-        if let c = Catalog.loadIndexCache() {
-            add(c.list)
-            loading = false
-            let h = Int(c.age / 3600)
-            progressText = "本地索引 \(pool.count) 部（\(h < 1 ? "刚刚" : "\(h) 小时前")）"
-            if c.age < 60 * 60 * 6 { return }
-        } else {
-            loading = true
+    /// 首次进入时后台解压内置索引（约 34 MB），不阻塞界面
+    private func warmUp() async {
+        if LocalIndex.shared.isReady {
+            indexCount = LocalIndex.shared.totalCount
+            indexReady = true
+            loadingIndex = false
+            return
         }
-
-        if let h = try? await Catalog.home() { add(h.flatMap(\.items)) }
-        progressText = "本地索引 \(pool.count) 部…"
-
-        let perCat = 12
-        for c in Catalog.categories {
-            for p in 1...perCat {
-                guard let list = try? await Catalog.category(c.slug, page: p), !list.isEmpty else { break }
-                let before = pool.count
-                add(list)
-                progressText = "\(c.name) \(p)/\(perCat) · 本地索引 \(pool.count) 部"
-                if pool.count == before && p > 1 { break }
-            }
-        }
-        progressText = "本地索引 \(pool.count) 部"
-        loading = false
-        Catalog.saveIndexCache(pool)
+        let n = await Task.detached(priority: .utility) { LocalIndex.shared.totalCount }.value
+        indexCount = n
+        indexReady = n > 0
+        loadingIndex = false
     }
 }
 

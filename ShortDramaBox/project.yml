@@ -18,6 +18,11 @@ targets:
     platform: iOS
     sources:
       - path: Sources
+        excludes:
+          - "Resources/**"
+      # 全库索引（约 58.8 万部），压缩后约 20.5 MB，打进 App 包
+      - path: Sources/Resources
+        buildPhase: resources
     info:
       path: Info.plist
       properties:
