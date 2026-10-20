@@ -1,3 +1,6 @@
+#if canImport(UIKit)
+import UIKit
+#endif
 import Foundation
 import SwiftUI
 
@@ -34,6 +37,13 @@ final class UpdateChecker: ObservableObject {
 
     static let repo = "Gengbo89/hongguo-box"
     static var releasesPage: String { "https://github.com/\(repo)/releases" }
+
+    /// SideStore / AltStore 侧载源地址。
+    /// 在 SideStore 里加一次这个源，之后有新版本 SideStore 会自己提示，手机上点一下就装好。
+    /// 走 releases/latest/download：github.com 国内实测可达，
+    /// 而 raw.githubusercontent.com / jsDelivr 实测都连不上，不能用。
+    static let sourceURL = "https://github.com/\(repo)/releases/latest/download/apps.json"
+    static let sidestoreSite = "https://sidestore.io"
 
     /// 最新 release 的下载直链（未签名 IPA）
     static func ipaURL(tag: String) -> String {
@@ -94,6 +104,7 @@ final class UpdateChecker: ObservableObject {
 struct AboutView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var checker = UpdateChecker()
+    @State private var copied = false
 
     var body: some View {
         NavigationStack {
@@ -138,13 +149,42 @@ struct AboutView: View {
                 }
 
                 Section("如何更新") {
-                    Text("1. 点上面的「检查更新」，有新版本就下载 IPA")
-                        .font(.footnote)
-                    Text("2. 用 Sideloadly 把新 IPA 装到手机上（**不要先删掉旧的**）")
-                        .font(.footnote)
-                    Text("3. 覆盖安装会保留观看记录和缓存")
-                        .font(.footnote)
-                    Text("免费 Apple ID 签的 App 每 7 天要重签一次，重装即可。")
+                    Text("iOS 不允许 App 自己安装更新（App 改不了自己的安装包），所以「检查更新」只能告诉你有没有新版、把安装包地址给你。真正装上必须由外部安装器来做。")
+                        .font(.footnote).foregroundStyle(.secondary)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("方式一：SideStore（不用电脑，推荐）", systemImage: "1.circle.fill")
+                            .font(.footnote).foregroundStyle(.pink)
+                        Text("在 SideStore 里加一次下面的源，以后它自己就会提示有新版本，手机上点一下「更新」就装好了，观看记录保留。")
+                            .font(.footnote)
+                        Text(UpdateChecker.sourceURL)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                        Button {
+                            #if canImport(UIKit)
+                            UIPasteboard.general.string = UpdateChecker.sourceURL
+                            #endif
+                            copied = true
+                        } label: {
+                            Label(copied ? "已拷贝" : "拷贝源地址",
+                                  systemImage: copied ? "checkmark.circle.fill" : "doc.on.doc")
+                                .font(.footnote)
+                        }
+                        if let u = URL(string: UpdateChecker.sidestoreSite) {
+                            Link("SideStore 官网（初次安装需要一台电脑）", destination: u)
+                                .font(.footnote)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("方式二：Sideloadly（电脑覆盖安装）", systemImage: "2.circle.fill")
+                            .font(.footnote)
+                        Text("点上面的「检查更新」，下载新 IPA，用 Sideloadly 装到手机上。不要先删掉旧 App，直接覆盖，记录和缓存都在。")
+                            .font(.footnote)
+                    }
+
+                    Text("免费 Apple ID 签的 App 每 7 天过期，重装或让 SideStore 后台刷新即可。")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }
