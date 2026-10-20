@@ -94,4 +94,50 @@ enum MediaStore {
         progress(1.0)
         return out
     }
+
+    /// 档位名 -> Rendition；识别不了就按实际短边就近推断。
+    static func rendition(for track: VideoTrack) -> Rendition? {
+        if let r = Rendition(rawValue: track.definition) { return r }
+        let edge = min(track.width, track.height)
+        guard edge > 0 else { return nil }
+        return Rendition.matching(shortEdge: edge) ?? Rendition.nearest(atMost: edge)
+    }
+
+    /// 取一条能直接交给 AVPlayer 的本地文件。
+    ///
+    /// - 轨道本身能解码 -> 下载 + 解密后返回
+    /// - 轨道是 bytevc2 这类本机解不了的编码 -> 先下载同 vid 里可解码的最高清晰度档，
+    ///   解密后本机转码到该档位的分辨率，返回转码结果（已缓存则直接复用）
+    ///
+    /// 这样源站给的档位一条都不丢，播不了的在本地补齐。
+    @discardableResult
+    static func prepareForPlayback(
+        vid: String, track: VideoTrack, pool: [VideoTrack],
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> URL {
+        // 公开明文备用源、以及标准编码，直接走原流程
+        guard PlayerAPI.needsTranscode(track) else {
+            return try await prepare(vid: vid, track: track, progress: progress)
+        }
+        // 需要本机转码：先找到能解码的输入源
+        guard let source = PlayerAPI.transcodeSource(pool) else {
+            throw TranscoderError.noVideoTrack
+        }
+        let edge = max(min(track.width, track.height), 1)
+        guard let target = rendition(for: track) ?? Rendition.nearest(atMost: edge) else {
+            // 连目标档位都认不出来：退回可解码的源，至少保证能播
+            return try await prepare(vid: vid, track: source, progress: progress)
+        }
+        // 源本身不比目标大：转码只会放大，直接用源
+        let sourceEdge = min(source.width, source.height)
+        if sourceEdge > 0, sourceEdge <= target.shortEdge {
+            return try await prepare(vid: vid, track: source, progress: progress)
+        }
+        let decrypted = try await prepare(vid: vid, track: source) { p in
+            progress(p * 0.45)
+        }
+        return try await Transcoder.transcode(source: decrypted, rendition: target) { p in
+            progress(0.45 + p * 0.55)
+        }
+    }
 }

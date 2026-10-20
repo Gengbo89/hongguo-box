@@ -88,29 +88,64 @@ enum PlayerAPI {
         return t
     }
 
-    /// 该编码能否被 AVFoundation 解码。
-    /// bytevc1 → MP4 里是 hvc1（标准 HEVC），AVPlayer / Safari 都能解。
-    /// bytevc2 → MP4 里是 bvc2（字节自研私有编码），AVFoundation 明确报 isDecodable=false，
-    ///           选了必然黑屏，所以一律过滤掉。
+    /// 该编码能否**直接**交给 AVFoundation 解码。
+    /// bytevc1 -> MP4 里是 hvc1（标准 HEVC），AVPlayer 能解；h265 / hev1 / hevc 同理；
+    /// avc1 / avc3 是 H.264。
+    /// bytevc2 -> MP4 里是 bvc2（字节自研私有编码），VideoToolbox 明确返回
+    ///            kVTCouldNotFindVideoDecoderErr(-12906)，直接播必然黑屏 ——
+    ///            这类档位不再丢弃，而是交给本机转码补齐（见 Transcoder.swift）。
     static func isPlayableCodec(_ codec: String) -> Bool {
         let c = codec.lowercased()
         if c.isEmpty { return true }              // 编码未知时不武断排除
-        return c == "bytevc1" || c == "hvc1" || c == "hev1" || c == "avc1" || c == "avc3"
+        return c == "bytevc1" || c == "hvc1" || c == "hev1" || c == "h265"
+            || c == "hevc" || c == "avc1" || c == "avc3"
     }
 
-    /// 统一取流：游客接口优先，失败才回退公开源
-    static func tracks(for vid: String) async -> [VideoTrack] {
-        // 偶发失败时重试，避免直接掉到 360p 备用源
+    /// 这条档位需要本机转码才能播（源站给了，但 iOS 没有这个解码器）
+    static func needsTranscode(_ track: VideoTrack) -> Bool {
+        guard !track.spadeA.isEmpty else { return false }   // 公开明文源是 H.264
+        return !isPlayableCodec(track.codec)
+    }
+
+    /// 清晰度从高到低：先比短边，再比体量
+    static func sorted(_ list: [VideoTrack]) -> [VideoTrack] {
+        list.sorted {
+            let a = min($0.width, $0.height), b = min($1.width, $1.height)
+            if a != b { return a > b }
+            return $0.size > $1.size
+        }
+    }
+
+    /// 能直接播的档位子集
+    static func playable(_ list: [VideoTrack]) -> [VideoTrack] {
+        list.filter { isPlayableCodec($0.codec) }
+    }
+
+    /// 本机转码的输入源：可解码档位里清晰度最高的一条（通常 1080p 的 bytevc1）
+    static func transcodeSource(_ list: [VideoTrack]) -> VideoTrack? {
+        playable(list).max {
+            let a = min($0.width, $0.height), b = min($1.width, $1.height)
+            if a != b { return a < b }
+            return $0.size < $1.size
+        }
+    }
+
+    /// 全部档位，**一条都不过滤**，按清晰度从高到低。
+    /// 播不了的档位也照样返回，由播放器决定走本机转码。
+    static func allTracks(for vid: String) async -> [VideoTrack] {
         for attempt in 0..<3 {
-            if let t = try? await videoModel(vid), !t.isEmpty {
-                let ok = t.filter { isPlayableCodec($0.codec) }
-                if !ok.isEmpty { return ok }
-                // 全是不支持的私有编码：继续走备用源，别把黑屏片源交出去
-                break
-            }
+            if let t = try? await videoModel(vid), !t.isEmpty { return sorted(t) }
             if attempt < 2 { try? await Task.sleep(nanoseconds: 700_000_000) }
         }
         if let f = await publicFallback(vid) { return [f] }
         return []
+    }
+
+    /// 统一取流：优先给能直接播的档位；一条都直接播不了时，把原始档位交出去
+    /// 交给 prepareForPlayback 做本机转码，而不是回退成「没有片源」。
+    static func tracks(for vid: String) async -> [VideoTrack] {
+        let all = await allTracks(for: vid)
+        let ok = playable(all)
+        return ok.isEmpty ? all : sorted(ok)
     }
 }
