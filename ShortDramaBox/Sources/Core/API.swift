@@ -104,14 +104,48 @@ enum Catalog {
         }.filter { !$0.items.isEmpty }
     }
 
-    static func category(_ slug: String) async throws -> [Series] {
-        guard let j = routerJSON(try await friendlyGet("\(base)/category/\(slug)", what: "该分类不存在或已下架")) else { throw ApiError.noData }
+    static func category(_ slug: String, page: Int = 1) async throws -> [Series] {
+        var url = "\(base)/category/\(slug)"
+        if page > 1 { url += "?page=\(page)" }
+        guard let j = routerJSON(try await friendlyGet(url, what: "该分类不存在或已下架")) else { throw ApiError.noData }
         let ld = asDict(j["loaderData"])
         for (_, v) in ld {
             let rec = asArr(asDict(v)["recommendList"])
             if !rec.isEmpty { return rec.map { seriesFrom(asDict($0)) } }
         }
         return []
+    }
+
+    /// 聚合首页 + 各频道多页，构建较大的搜索索引。
+    /// - Parameters:
+    ///   - pagesPerCategory: 每个频道抓多少页（每页约 24 部）
+    ///   - progress: 进度回调（已完成请求数, 总请求数, 当前已收集部数）
+    static func buildIndex(pagesPerCategory: Int = 12,
+                           progress: @escaping (Int, Int, Int) -> Void) async -> [Series] {
+        var pool: [String: Series] = [:]
+        let total = 1 + categories.count * pagesPerCategory
+        var done = 0
+        func bump() { done += 1; progress(done, total, pool.count) }
+
+        if let h = try? await home() {
+            for s in h.flatMap(\.items) { pool[s.id] = s }
+        }
+        bump()
+
+        for c in categories {
+            for p in 1...pagesPerCategory {
+                guard let list = try? await category(c.slug, page: p), !list.isEmpty else {
+                    done += (pagesPerCategory - p + 1)
+                    progress(done, total, pool.count)
+                    break
+                }
+                var added = 0
+                for s in list where pool[s.id] == nil { pool[s.id] = s; added += 1 }
+                bump()
+                if added == 0 && p > 1 { break }
+            }
+        }
+        return Array(pool.values)
     }
 
     static func detail(_ seriesId: String) async throws -> (Series, [Episode]) {

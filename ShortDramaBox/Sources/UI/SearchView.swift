@@ -1,24 +1,34 @@
 import SwiftUI
 
-/// 站内搜索为客户端渲染，故本地建立索引后过滤
+/// 站内搜索为客户端渲染，故本地建立索引后过滤。
+/// 索引来源：首页 + 各频道多页（每页约 24 部），可达近千部。
 struct SearchView: View {
     @State private var q = ""
     @State private var pool: [Series] = []
     @State private var loading = true
+    @State private var progressText = "准备中…"
+    @State private var seen = Set<String>()
 
     private var results: [Series] {
         let k = q.trimmingCharacters(in: .whitespaces)
         guard !k.isEmpty else { return [] }
-        return pool.filter { $0.title.localizedCaseInsensitiveContains(k) || $0.tags.contains { $0.contains(k) } }
+        // 列表接口不返回 tags，因此只按片名匹配
+        return pool.filter { $0.title.localizedCaseInsensitiveContains(k) }
     }
 
     var body: some View {
         NavigationStack {
             Group {
-                if loading { ProgressView("建立索引…") }
-                else if q.isEmpty {
+                if loading && pool.isEmpty {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text(progressText).font(.system(size: 13)).foregroundStyle(.secondary)
+                    }
+                } else if q.isEmpty {
                     ContentUnavailableView("搜索短剧", systemImage: "magnifyingglass",
-                                           description: Text("已索引 \(pool.count) 部，输入片名或标签"))
+                                           description: Text(loading
+                                               ? "已索引 \(pool.count) 部，仍在继续…\n\(progressText)"
+                                               : "已索引 \(pool.count) 部，输入片名"))
                 } else if results.isEmpty {
                     ContentUnavailableView.search(text: q)
                 } else {
@@ -30,21 +40,48 @@ struct SearchView: View {
                             }
                         }.padding()
                     }
+                    .safeAreaInset(edge: .top) {
+                        if loading {
+                            Text(progressText)
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity).padding(.vertical, 5)
+                                .background(.ultraThinMaterial)
+                        }
+                    }
                 }
             }
             .navigationTitle("搜索")
-            .searchable(text: $q, prompt: "片名 / 标签")
-            .task { await buildIndex() }
+            .searchable(text: $q, prompt: "输入片名")
+            .task { await runIndex() }
         }
     }
 
-    private func buildIndex() async {
+    private func add(_ list: [Series]) {
+        for s in list where !s.id.isEmpty && seen.insert(s.id).inserted { pool.append(s) }
+    }
+
+    private func runIndex() async {
         loading = true
-        var seen = Set<String>(); var out: [Series] = []
-        func add(_ list: [Series]) { for s in list where !s.id.isEmpty && seen.insert(s.id).inserted { out.append(s) } }
+        // 首页先出，让用户立刻能搜到热播
         if let h = try? await Catalog.home() { add(h.flatMap(\.items)) }
-        for c in Catalog.categories { if let l = try? await Catalog.category(c.slug) { add(l) } }
-        pool = out
+        progressText = "已索引 \(pool.count) 部…"
+
+        let perCat = 12
+        let total = Catalog.categories.count * perCat
+        var done = 0
+        for c in Catalog.categories {
+            for p in 1...perCat {
+                guard let list = try? await Catalog.category(c.slug, page: p), !list.isEmpty else {
+                    done += (perCat - p + 1); break
+                }
+                let before = pool.count
+                add(list)
+                done += 1
+                progressText = "\(c.name) \(p)/\(perCat) · 已索引 \(pool.count) 部（\(done * 100 / max(total,1))%）"
+                if pool.count == before && p > 1 { done += (perCat - p); break }
+            }
+        }
+        progressText = "已索引 \(pool.count) 部"
         loading = false
     }
 }
