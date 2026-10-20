@@ -15,6 +15,8 @@ struct PlayerView: View {
     @State private var scrolledID: Int?
     /// 每集自己解析出来的清晰度，key 是集号
     @State private var qualityOf: [Int: String] = [:]
+    /// 每集源站给的全部档位（一条都不过滤），key 是集号
+    @State private var availableOf: [Int: [VideoTrack]] = [:]
     @State private var preferredQuality: String? = nil
 
     init(series: Series, episodes: [Episode], start: Episode) {
@@ -38,6 +40,7 @@ struct PlayerView: View {
                                 speed: speed,
                                 forceQuality: preferredQuality,
                                 onQuality: { q in qualityOf[ep.index] = q },
+                                onTracks: { list in availableOf[ep.index] = list },
                                 onEnded: {
                                     // 播完自动跳下一集（页面会跟着滑过去）
                                     if let nxt = episodes.first(where: { $0.index == ep.index + 1 }) {
@@ -113,25 +116,34 @@ struct PlayerView: View {
                     }
                 }
 
-                Section("清晰度") {
-                    if qualityOf[current.index] == nil {
+                Section {
+                    let list = availableOf[current.index] ?? []
+                    if list.isEmpty {
                         Text("正在解析…").foregroundStyle(.secondary).font(.footnote)
                     } else {
-                        // 只列真实存在的档位；换清晰度对当前集生效
-                        ForEach(qualityChoices, id: \.self) { q in
+                        // 列出源站给的全部档位，一条都不过滤；
+                        // 本机解不了的编码标注「本机转码」，选中后本地补齐
+                        ForEach(list, id: \.self) { t in
                             Button {
-                                preferredQuality = q
+                                preferredQuality = t.definition
                             } label: {
-                                HStack {
-                                    Text(q)
+                                HStack(spacing: 8) {
+                                    Text(t.definition)
+                                    sourceBadge(for: t)
                                     Spacer()
-                                    if qualityOf[current.index] == q {
+                                    if qualityOf[current.index] == t.definition {
                                         Image(systemName: "checkmark").foregroundStyle(.pink)
                                     }
                                 }
                             }
                         }
                     }
+                } header: {
+                    Text("清晰度")
+                } footer: {
+                    Text("「本机转码」= 源站这一档是 bytevc2，iOS 没有对应解码器，"
+                         + "改由本机把可解码的源档转成这个分辨率；第一次播会慢几秒，之后走缓存。")
+                        .font(.footnote)
                 }
 
                 Section("选集") {
@@ -162,12 +174,24 @@ struct PlayerView: View {
         }
     }
 
-    /// 已知的清晰度档位（从已解析过的集里汇总）
-    private var qualityChoices: [String] {
-        let base = ["1080p", "720p", "540p", "480p", "360p", "公开360p"]
-        let known = Set(qualityOf.values)
-        let hit = base.filter { known.contains($0) }
-        return hit.isEmpty ? base : hit
+    /// 档位来源标记：本机转码 / 公开明文源
+    @ViewBuilder
+    private func sourceBadge(for t: VideoTrack) -> some View {
+        if PlayerAPI.needsTranscode(t) {
+            Text("本机转码")
+                .font(.system(size: 10, weight: .semibold))
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(Color.orange.opacity(0.18))
+                .foregroundStyle(.orange)
+                .clipShape(Capsule())
+        } else if t.spadeA.isEmpty {
+            Text("明文源")
+                .font(.system(size: 10, weight: .semibold))
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(Color.green.opacity(0.18))
+                .foregroundStyle(.green)
+                .clipShape(Capsule())
+        }
     }
 }
 
