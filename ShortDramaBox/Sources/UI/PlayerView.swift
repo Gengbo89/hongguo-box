@@ -219,8 +219,10 @@ private struct EpisodePage: View {
     @State private var endObs: NSObjectProtocol?
     @State private var started = false
     @State private var failed = false
-    /// 与推荐页共用同一个画面填充设置
-    @AppStorage("video_fill") private var videoFill = true
+    /// 画面填充模式（0 自动 / 1 铺满 / 2 适应），与推荐页共用
+    @AppStorage("video_fit_mode") private var fitMode = 0
+    /// 当前这一集的片源尺寸，交给自动判定是否该铺满
+    @State private var videoSize: CGSize = .zero
 
     var body: some View {
         ZStack {
@@ -229,7 +231,11 @@ private struct EpisodePage: View {
                 // 与推荐页同一套渲染：AVPlayerLayer + 自定 videoGravity。
                 // VideoPlayer 自带控制条、尺寸算法也不一样，
                 // 两处画面表现不一致，正是「每个播放的地方都不对」的一部分。
-                Color.clear.overlay { PlayerLayerView(player: p, fill: videoFill) }
+                Color.clear.overlay {
+                    PlayerLayerView(player: p,
+                                    fill: VideoFit.forced(fitMode),
+                                    videoSize: videoSize)
+                }
             } else {
                 VStack(spacing: 14) {
                     if failed {
@@ -301,6 +307,8 @@ private struct EpisodePage: View {
                 status = "无可用清晰度"; failed = true; return
             }
             onQuality(best.definition)
+            // 接口给的尺寸：横屏片源靠它避开「被截一条铺满屏幕」
+            videoSize = CGSize(width: best.width, height: best.height)
             let transcoding = PlayerAPI.needsTranscode(best)
 
             let url = try await MediaStore.prepareForPlayback(

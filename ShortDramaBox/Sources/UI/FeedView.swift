@@ -25,28 +25,39 @@ struct FeedItem: Identifiable {
 //
 // 不用 SwiftUI 的 VideoPlayer：它自带一套控制层，放进分页容器里
 // 会按自己的方式算尺寸，容易导致画面被裁或比例不对。
-// 这里直接用 AVPlayerLayer，videoGravity 自己定，画面一定完整。
+// 这里直接用 AVPlayerLayer，videoGravity 自己定。
+//
+// 关于「铺满」：实测片库里 58% 的片源是横屏 1920x1080（抽样 31 部，18 部横屏）。
+// 竖屏手机上按铺满渲染：缩放 max(393/1920, 852/1080)=0.789，渲染成 1515x852，
+// 屏幕上一共只能看到中间 25.9% 的宽度，而且相对「适应」放大了 3.85 倍 ——
+// 表现就是"横屏被截了一条铺满屏幕"，又糊又看不到内容。
+// 竖屏片源同样按铺满只保留约 80% 宽度，属于正常的满屏裁边。
+// 所以默认交给自动判定：裁太多就改成完整显示。
 #if os(iOS)
 struct PlayerLayerView: UIViewRepresentable {
     let player: AVPlayer
-    /// true = 铺满（可能裁边）；false = 完整显示（可能有黑边）
-    var fill: Bool = false
+    /// nil = 自动按比例决定；true = 强制铺满；false = 强制完整显示
+    var fill: Bool? = nil
+    /// 片源尺寸提示（接口的 vwidth/vheight）。.zero 表示未知
+    var videoSize: CGSize = .zero
 
     func makeUIView(context: Context) -> PlayerHostView {
         let v = PlayerHostView()
         v.backgroundColor = .black
-        v.playerLayer.player = player
-        v.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
+        v.userFill = fill
+        v.hint = videoSize
+        v.attach(player)
         return v
     }
 
     func updateUIView(_ v: PlayerHostView, context: Context) {
-        if v.playerLayer.player !== player { v.playerLayer.player = player }
-        v.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
+        v.userFill = fill
+        v.hint = videoSize
+        v.attach(player)
     }
 
     static func dismantleUIView(_ v: PlayerHostView, coordinator: ()) {
-        v.playerLayer.player = nil
+        v.attach(nil)
     }
 }
 
@@ -54,25 +65,112 @@ final class PlayerHostView: UIView {
     override static var layerClass: AnyClass { AVPlayerLayer.self }
     var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
 
+    /// nil = 自动；true = 强制铺满；false = 强制完整显示
+    var userFill: Bool? { didSet { if userFill != oldValue { applyGravity() } } }
+    /// 接口给的片源尺寸（可能为 .zero）
+    var hint: CGSize = .zero { didSet { if hint != oldValue { applyGravity() } } }
+
+    private var sizeObs: NSKeyValueObservation?
+    private weak var observedItem: AVPlayerItem?
+
     // 关键：UIKit 承载视图默认参与触摸，会吃掉上层 SwiftUI 按钮（选集等）的点击，
     // 表现就是"点了没反应"。播放器只负责画面，不接收任何手势。
     override init(frame: CGRect) {
         super.init(frame: frame)
         isUserInteractionEnabled = false
+        playerLayer.videoGravity = .resizeAspect
     }
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         isUserInteractionEnabled = false
+        playerLayer.videoGravity = .resizeAspect
+    }
+    deinit { sizeObs?.invalidate() }
+
+    func attach(_ player: AVPlayer?) {
+        if playerLayer.player !== player { playerLayer.player = player }
+        let item = player?.currentItem
+        // updateUIView 每次刷新都会走到这里，item 没换就别重建 KVO
+        if observedItem === item { applyGravity(); return }
+        observedItem = item
+        sizeObs?.invalidate(); sizeObs = nil
+        guard let item else { applyGravity(); return }
+        sizeObs = item.observe(\.presentationSize, options: [.initial, .new]) { [weak self] it, _ in
+            let s = it.presentationSize
+            guard s.width > 0, s.height > 0 else { return }
+            DispatchQueue.main.async { self?.applyGravity() }
+        }
+        applyGravity()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        applyGravity()
+    }
+
+    /// 解码出来的真实尺寸优先于接口值：公开备用源那种情况下接口值是估的
+    private var videoSize: CGSize {
+        if let s = playerLayer.player?.currentItem?.presentationSize, s.width > 0, s.height > 0 {
+            return s
+        }
+        return hint
+    }
+
+    func applyGravity() {
+        let fill = userFill ?? Self.autoFill(video: videoSize, view: bounds.size)
+        let g: AVLayerVideoGravity = fill ? .resizeAspectFill : .resizeAspect
+        if playerLayer.videoGravity != g { playerLayer.videoGravity = g }
+    }
+
+    /// 自动判定：铺满后可见画面不足七成就改成完整显示。
+    /// 竖屏片源铺满约保留 80%，横屏只剩 25.9%，阈值取在两者之间。
+    static func autoFill(video: CGSize, view: CGSize) -> Bool {
+        guard video.width > 0, video.height > 0, view.width > 0, view.height > 0 else {
+            return false   // 尺寸未知时先完整显示，绝不裁掉画面
+        }
+        let s = max(view.width / video.width, view.height / video.height)
+        let visible = min(view.width / (video.width * s), view.height / (video.height * s))
+        return visible >= 0.70
     }
 }
 #else
 /// 非 iOS（仅用于本机编译检查）
 struct PlayerLayerView: View {
     let player: AVPlayer
-    var fill: Bool = false
+    var fill: Bool? = nil
+    var videoSize: CGSize = .zero
     var body: some View { Color.black }
 }
 #endif
+
+/// 画面填充偏好：推荐页与播放器页共用同一个设置
+enum VideoFit {
+    static let auto = 0, fill = 1, fit = 2
+
+    /// nil 交给自动判定
+    static func forced(_ mode: Int) -> Bool? {
+        switch mode {
+        case fill: return true
+        case fit: return false
+        default: return nil
+        }
+    }
+    static func label(_ mode: Int) -> String {
+        switch mode {
+        case fill: return "铺满"
+        case fit: return "适应"
+        default: return "自动"
+        }
+    }
+    static func icon(_ mode: Int) -> String {
+        switch mode {
+        case fill: return "rectangle.expand.vertical"
+        case fit: return "rectangle.arrowtriangle.2.inward"
+        default: return "wand.and.stars"
+        }
+    }
+    static func next(_ mode: Int) -> Int { (mode + 1) % 3 }
+}
 
 // MARK: - 推荐流数据
 
@@ -273,8 +371,8 @@ private struct FeedCard: View {
     @State private var liked = false
     @State private var showQuality = false
     @State private var ended: NSObjectProtocol?
-    /// 画面填充（true=铺满可能裁边 / false=完整显示留黑边），与播放器页共用同一个设置
-    @AppStorage("video_fill") private var videoFill = true
+    /// 画面填充模式（0 自动 / 1 铺满 / 2 适应），与播放器页共用
+    @AppStorage("video_fit_mode") private var fitMode = 0
 
     var body: some View {
         ZStack {
@@ -299,7 +397,12 @@ private struct FeedCard: View {
                 .overlay(Color.black.opacity(player == nil ? 0.1 : 0.55))
 
             if let p = player {
-                Color.clear.overlay { PlayerLayerView(player: p, fill: videoFill) }
+                Color.clear.overlay {
+                    PlayerLayerView(player: p,
+                                    fill: VideoFit.forced(fitMode),
+                                    videoSize: CGSize(width: item.track?.width ?? 0,
+                                                      height: item.track?.height ?? 0))
+                }
             } else {
                 loadingOverlay
             }
@@ -340,11 +443,9 @@ private struct FeedCard: View {
                 Button(action: onDetail) {
                     sideIcon("list.bullet", "选集")
                 }
-                // 画面不合胃口时能当场切换：铺满(裁边) / 适应(留黑边)
-                Button { videoFill.toggle() } label: {
-                    sideIcon(videoFill ? "rectangle.expand.vertical"
-                                       : "rectangle.arrowtriangle.2.inward",
-                             videoFill ? "铺满" : "适应")
+                // 自动按片源比例决定；不合胃口时能当场切：铺满(裁边) / 适应(留黑边)
+                Button { fitMode = VideoFit.next(fitMode) } label: {
+                    sideIcon(VideoFit.icon(fitMode), VideoFit.label(fitMode))
                 }
             }
             .padding(.trailing, 14)
