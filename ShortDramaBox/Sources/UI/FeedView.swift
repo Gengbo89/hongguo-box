@@ -12,8 +12,10 @@ struct FeedItem: Identifiable {
         case ready(URL)
         case failed(String)
     }
-    let series: Series
+    var series: Series
     var episode: Episode?
+    /// 解析时顺手存下的全集列表，点画面时直接起播，不用再请求一次
+    var episodes: [Episode] = []
     var track: VideoTrack?
     var status: Status = .pending
     var id: String { series.id }
@@ -136,6 +138,13 @@ final class FeedModel: ObservableObject {
         }
     }
 
+    /// 从播放器回来后重新解析这一页，让它接着新进度播
+    func refresh(_ index: Int) {
+        guard items.indices.contains(index) else { return }
+        items[index].status = .pending
+        prepareOne(index)
+    }
+
     private func prepareOne(_ i: Int) {
         guard items.indices.contains(i) else { return }
         switch items[i].status {
@@ -159,10 +168,16 @@ final class FeedModel: ObservableObject {
         defer { inFlight.remove(series.id) }
 
         // 详情（拿集数）
-        guard let (_, eps) = try? await Catalog.detail(series.id), !eps.isEmpty else {
+        guard let (full, eps) = try? await Catalog.detail(series.id), !eps.isEmpty else {
             setStatus(i, .failed("暂无片源")); return
         }
         guard items.indices.contains(i) else { return }
+
+        // 简介只有详情接口才有（内置索引里没存，省体积），补进这一页
+        if items[i].series.intro.isEmpty, !full.intro.isEmpty {
+            items[i].series.intro = full.intro
+        }
+        if items[i].series.episodeCount == 0 { items[i].series.episodeCount = full.episodeCount }
 
         // 优先从上次看到的那集接着播（记录里有就续播，否则随机）
         let ep: Episode
@@ -173,6 +188,7 @@ final class FeedModel: ObservableObject {
             ep = eps.randomElement() ?? eps[0]
         }
         items[i].episode = ep
+        items[i].episodes = eps
 
         // 取流：全部档位都要，播不了的留给本机转码
         let tracks = await PlayerAPI.allTracks(for: ep.vid)
@@ -215,7 +231,8 @@ final class FeedModel: ObservableObject {
 private struct FeedCard: View {
     let item: FeedItem
     let isActive: Bool
-    var onOpen: () -> Void
+    var onPlay: () -> Void      // 点画面：接着上次进度播放
+    var onDetail: () -> Void    // 右侧「选集」：进详情页
 
     @State private var player: AVPlayer?
     @State private var muted = false
@@ -242,10 +259,10 @@ private struct FeedCard: View {
                 loadingOverlay
             }
 
-            // 整屏可点：点画面任意处进剧集详情
+            // 整屏可点：点画面任意处接着上次进度播放
             Color.clear
                 .contentShape(Rectangle())
-                .onTapGesture { onOpen() }
+                .onTapGesture { onPlay() }
 
             // 清晰度角标
             if let t = item.track, player != nil {
@@ -275,7 +292,7 @@ private struct FeedCard: View {
                     sideIcon(muted ? "speaker.slash.fill" : "speaker.wave.2.fill",
                              muted ? "已静音" : "有声")
                 }
-                Button(action: onOpen) {
+                Button(action: onDetail) {
                     sideIcon("list.bullet", "选集")
                 }
             }
@@ -302,11 +319,13 @@ private struct FeedCard: View {
                         .font(.system(size: 12)).foregroundStyle(.white.opacity(0.72))
                         .lineLimit(2)
                 }
-                Text("上滑看下一部 · 点画面进剧集")
+                Text("上滑看下一部 · 点画面继续观看")
                     .font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
             }
             .padding(.horizontal, 16).padding(.bottom, 24)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // 必须显式贴底：ZStack 默认垂直居中，只设 maxWidth 会让这块文字
+            // 飘在屏幕中间挡住画面（简介尤其明显）。
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             .background(
                 LinearGradient(colors: [.clear, .black.opacity(0.8)],
                                startPoint: .top, endPoint: .bottom)
@@ -380,10 +399,19 @@ private struct FeedCard: View {
 
 // MARK: - 推荐流
 
+/// 点画面要起播的目标（播放器需要全集列表 + 起始集）
+private struct PlayTarget: Identifiable {
+    let series: Series
+    let episodes: [Episode]
+    let start: Episode
+    var id: String { series.id }
+}
+
 struct FeedView: View {
     @StateObject private var model = FeedModel()
     @State private var scrolledID: Int?
     @State private var open: FeedItem?
+    @State private var play: PlayTarget?
 
     private var index: Int { scrolledID ?? 0 }
 
@@ -402,9 +430,45 @@ struct FeedView: View {
             }
         }
         .task { if model.items.isEmpty { await model.load() } }
+        // 右侧「选集」才进详情页
         .sheet(item: $open) { it in
             NavigationStack { DetailView(series: it.series) }
         }
+        // 点画面直接接着进度播，不再绕一层详情页
+        .fullScreenCover(item: $play, onDismiss: {
+            let i = index
+            guard model.items.indices.contains(i) else { return }
+            let it = model.items[i]
+            if let now = WatchStore.shared.progress(seriesId: it.series.id)?.episode,
+               now != it.episode?.index {
+                model.refresh(i)   // 只有换了集才重解析，免得白闪一下
+            }
+        }) { t in
+            PlayerView(series: t.series, episodes: t.episodes, start: t.start)
+        }
+    }
+
+    /// 点画面：接着上次进度起播。集列表在解析时就顺手存下来了，
+    /// 万一是还没解析完就抢点，这里补一次请求。
+    private func startPlay(_ i: Int) {
+        guard model.items.indices.contains(i) else { return }
+        let it = model.items[i]
+        if !it.episodes.isEmpty {
+            play = PlayTarget(series: it.series, episodes: it.episodes, start: resumeEpisode(it))
+            return
+        }
+        Task {
+            guard let (s, eps) = try? await Catalog.detail(it.series.id), !eps.isEmpty else { return }
+            var filled = it
+            filled.episodes = eps
+            play = PlayTarget(series: s, episodes: eps, start: resumeEpisode(filled))
+        }
+    }
+
+    /// 有观看记录就从记录那集开始，否则用这一页已经解析出的那集
+    private func resumeEpisode(_ it: FeedItem) -> Episode {
+        let want = WatchStore.shared.progress(seriesId: it.series.id)?.episode ?? it.episode?.index ?? 1
+        return it.episodes.first { $0.index == want } ?? it.episodes[0]
     }
 
     /// 原生竖向分页：每页正好一屏。
@@ -414,7 +478,9 @@ struct FeedView: View {
         ScrollView(.vertical) {
             LazyVStack(spacing: 0) {
                 ForEach(Array(model.items.enumerated()), id: \.element.id) { i, it in
-                    FeedCard(item: it, isActive: i == index) { open = it }
+                    FeedCard(item: it, isActive: i == index,
+                             onPlay: { startPlay(i) },
+                             onDetail: { open = it })
                         .containerRelativeFrame([.horizontal, .vertical])
                         .id(i)
                 }
