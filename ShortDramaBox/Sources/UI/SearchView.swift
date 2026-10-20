@@ -61,11 +61,23 @@ struct SearchView: View {
     }
 
     private func runIndex() async {
-        loading = true
-        // 首页先出，让用户立刻能搜到热播
+        // 1) 先用磁盘缓存，秒开
+        if let c = Catalog.loadIndexCache() {
+            add(c.list)
+            loading = false
+            let h = Int(c.age / 3600)
+            progressText = "已索引 \(pool.count) 部（缓存 \(h < 1 ? "刚刚" : "\(h) 小时前")）"
+            // 缓存 6 小时内视为新鲜，不再打网络
+            if c.age < 60 * 60 * 6 { return }
+        } else {
+            loading = true
+        }
+
+        // 2) 首页先出，让用户立刻能搜到热播
         if let h = try? await Catalog.home() { add(h.flatMap(\.items)) }
         progressText = "已索引 \(pool.count) 部…"
 
+        // 3) 分频道翻页补齐
         let perCat = 12
         let total = Catalog.categories.count * perCat
         var done = 0
@@ -83,6 +95,7 @@ struct SearchView: View {
         }
         progressText = "已索引 \(pool.count) 部"
         loading = false
+        Catalog.saveIndexCache(pool)
     }
 }
 

@@ -1,6 +1,6 @@
 import Foundation
 
-struct Series: Identifiable, Hashable {
+struct Series: Identifiable, Hashable, Codable {
     let id: String
     var title: String = ""
     var cover: String = ""
