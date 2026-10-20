@@ -1,29 +1,29 @@
-构建 #13  2026-10-20T02:23:49Z
-commit: 5b51c48e104bbf192566e3c7de99880a22488d69
-IPA 字节数: 659249
+构建 #14  2026-10-20T03:14:32Z
+commit: d27430812956973aee5976b9837786e33fdd033b
+IPA 字节数: 680963
 --- IPA 内容 ---
 Archive:  ShortDramaBox-unsigned.ipa
   Length      Date    Time    Name
 ---------  ---------- -----   ----
-        0  10-20-2026 02:23   Payload/
-        0  10-20-2026 02:23   Payload/ShortDramaBox.app/
-     5121  10-20-2026 02:23   Payload/ShortDramaBox.app/AppIcon60x60@2x.png
-   353704  10-20-2026 02:23   Payload/ShortDramaBox.app/Assets.car
-     6753  10-20-2026 02:23   Payload/ShortDramaBox.app/AppIcon76x76@2x~ipad.png
-     1104  10-20-2026 02:23   Payload/ShortDramaBox.app/Info.plist
-        8  10-20-2026 02:23   Payload/ShortDramaBox.app/PkgInfo
-  1384304  10-20-2026 02:23   Payload/ShortDramaBox.app/ShortDramaBox
+        0  10-20-2026 03:14   Payload/
+        0  10-20-2026 03:14   Payload/ShortDramaBox.app/
+     5121  10-20-2026 03:14   Payload/ShortDramaBox.app/AppIcon60x60@2x.png
+   353704  10-20-2026 03:14   Payload/ShortDramaBox.app/Assets.car
+     6753  10-20-2026 03:14   Payload/ShortDramaBox.app/AppIcon76x76@2x~ipad.png
+     1104  10-20-2026 03:14   Payload/ShortDramaBox.app/Info.plist
+        8  10-20-2026 03:14   Payload/ShortDramaBox.app/PkgInfo
+  1449864  10-20-2026 03:14   Payload/ShortDramaBox.app/ShortDramaBox
 ---------                     -------
-  1750994                     8 files
+  1816554                     8 files
 app: /tmp/ck/Payload/ShortDramaBox.app
 --- Info.plist ---
 com.duanju.box
 短剧盒子
-1.0.13
-16.0
+1.0.14
+17.0
 --- 可执行文件 ---
--rwxr-xr-x  1 runner  wheel  1384304 Oct 20 02:23 /tmp/ck/Payload/ShortDramaBox.app/ShortDramaBox
+-rwxr-xr-x  1 runner  wheel  1449864 Oct 20 03:14 /tmp/ck/Payload/ShortDramaBox.app/ShortDramaBox
 /tmp/ck/Payload/ShortDramaBox.app/ShortDramaBox: Mach-O 64-bit executable arm64
 Non-fat file: /tmp/ck/Payload/ShortDramaBox.app/ShortDramaBox is architecture: arm64
 --- SHA256 ---
-435f040c080bd934b7f2d03174299a56d5099b68f45c61884a3433ae5cdee378  ShortDramaBox-unsigned.ipa
+b91f9cac3423c23beb497d51986ad756e90f9ad7d6b55641b0a96e921eeee4c4  ShortDramaBox-unsigned.ipa
