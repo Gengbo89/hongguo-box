@@ -42,9 +42,13 @@ struct DetailView: View {
 
     private var header: some View {
         HStack(alignment: .top, spacing: 12) {
-            AsyncImage(url: URL(string: detail.cover)) { $0.resizable().aspectRatio(contentMode: .fill) }
-                placeholder: { Rectangle().fill(Color.white.opacity(0.08)) }
-                .frame(width: 110, height: 146).clipShape(RoundedRectangle(cornerRadius: 10))
+            Color.clear
+                .frame(width: 110, height: 146)
+                .overlay {
+                    AsyncImage(url: URL(string: detail.cover)) { $0.resizable().aspectRatio(contentMode: .fill) }
+                        placeholder: { Rectangle().fill(Color.white.opacity(0.08)) }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 10))
             VStack(alignment: .leading, spacing: 6) {
                 Text(detail.title).font(.headline)
                 Text("共 \(max(detail.episodeCount, episodes.count)) 集"
@@ -60,15 +64,19 @@ struct DetailView: View {
     }
 
     private var episodeGrid: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        // 「看到第几集」只查一次。原来写在 ForEach 里、每集查两遍：
+        // 一百集就是两百次历史表线性扫描，而且 WatchStore 每 5 秒记一次进度
+        // 都会让整个网格重算一遍 —— 选集页卡顿主要来自这里。
+        let watching = store.progress(seriesId: series.id)?.episode
+        return VStack(alignment: .leading, spacing: 8) {
             Text("选集").font(.headline).padding(.horizontal)
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 56), spacing: 8)], spacing: 8) {
                 ForEach(episodes) { ep in
                     Button { play = ep } label: {
                         Text("\(ep.index)")
-                            .font(.system(size: 14, weight: store.progress(seriesId: series.id)?.episode == ep.index ? .bold : .regular))
+                            .font(.system(size: 14, weight: watching == ep.index ? .bold : .regular))
                             .frame(maxWidth: .infinity, minHeight: 38)
-                            .background(store.progress(seriesId: series.id)?.episode == ep.index
+                            .background(watching == ep.index
                                         ? Color.pink.opacity(0.35) : Color.white.opacity(0.08))
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                     }.buttonStyle(.plain).foregroundStyle(.white)

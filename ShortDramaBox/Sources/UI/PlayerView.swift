@@ -25,41 +25,44 @@ struct PlayerView: View {
     }
 
     var body: some View {
-        GeometryReader { geo in
-            ZStack {
-                Color.black.ignoresSafeArea()
+        ZStack {
+            Color.black.ignoresSafeArea()
 
-                // 竖向分页：一页一集，上下滑切换
-                ScrollView(.vertical) {
-                    LazyVStack(spacing: 0) {
-                        ForEach(episodes) { ep in
-                            EpisodePage(
-                                series: series,
-                                episode: ep,
-                                isActive: ep.index == current.index,
-                                speed: speed,
-                                forceQuality: preferredQuality,
-                                onQuality: { q in qualityOf[ep.index] = q },
-                                onTracks: { list in availableOf[ep.index] = list },
-                                onEnded: {
-                                    // 播完自动跳下一集（页面会跟着滑过去）
-                                    if let nxt = episodes.first(where: { $0.index == ep.index + 1 }) {
-                                        current = nxt
-                                        scrolledID = nxt.index
-                                    }
+            // 竖向分页：一页一集，上下滑切换
+            ScrollView(.vertical) {
+                LazyVStack(spacing: 0) {
+                    ForEach(episodes) { ep in
+                        EpisodePage(
+                            series: series,
+                            episode: ep,
+                            isActive: ep.index == current.index,
+                            speed: speed,
+                            forceQuality: preferredQuality,
+                            onQuality: { q in qualityOf[ep.index] = q },
+                            onTracks: { list in availableOf[ep.index] = list },
+                            onEnded: {
+                                // 播完自动跳下一集（页面会跟着滑过去）
+                                if let nxt = episodes.first(where: { $0.index == ep.index + 1 }) {
+                                    current = nxt
+                                    scrolledID = nxt.index
                                 }
-                            )
-                            .frame(width: geo.size.width, height: geo.size.height)
-                            .id(ep.index)
-                        }
+                            }
+                        )
+                        // 之前用 GeometryReader 的 geo.size 定页面尺寸：GeometryReader
+                        // 量到的是「安全区内」的高度，而下面滚动区 .ignoresSafeArea()
+                        // 铺到整屏，两者对不上 —— 每页都比可视区矮一截，
+                        // 分页错位、画面被推出屏幕，就是「出画」和「比例不对」。
+                        // containerRelativeFrame 直接取滚动容器的尺寸，天然对齐。
+                        .containerRelativeFrame([.horizontal, .vertical])
+                        .id(ep.index)
                     }
-                    .scrollTargetLayout()
                 }
-                .scrollTargetBehavior(.paging)
-                .scrollPosition(id: $scrolledID)
-                .scrollIndicators(.hidden)
-                .ignoresSafeArea()
+                .scrollTargetLayout()
             }
+            .scrollTargetBehavior(.paging)
+            .scrollPosition(id: $scrolledID)
+            .scrollIndicators(.hidden)
+            .ignoresSafeArea()
         }
         .onChange(of: scrolledID) { v in
             if let v, let e = episodes.first(where: { $0.index == v }) { current = e }
@@ -216,12 +219,17 @@ private struct EpisodePage: View {
     @State private var endObs: NSObjectProtocol?
     @State private var started = false
     @State private var failed = false
+    /// 与推荐页共用同一个画面填充设置
+    @AppStorage("video_fill") private var videoFill = true
 
     var body: some View {
         ZStack {
             Color.black
             if let p = player, ready {
-                VideoPlayer(player: p)
+                // 与推荐页同一套渲染：AVPlayerLayer + 自定 videoGravity。
+                // VideoPlayer 自带控制条、尺寸算法也不一样，
+                // 两处画面表现不一致，正是「每个播放的地方都不对」的一部分。
+                Color.clear.overlay { PlayerLayerView(player: p, fill: videoFill) }
             } else {
                 VStack(spacing: 14) {
                     if failed {

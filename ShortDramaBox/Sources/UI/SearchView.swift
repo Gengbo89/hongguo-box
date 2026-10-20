@@ -158,14 +158,14 @@ struct SearchView: View {
     }
 
     /// 首次进入时后台解压内置索引（约 34 MB），不阻塞界面
+    ///
+    /// 关键：isReady / totalCount 都会触发整包解压（20.5MB 压缩 → 34MB 展开）。
+    /// 原来第一句 `if LocalIndex.shared.isReady` 是直接在 MainActor 上跑的，
+    /// 等于进搜索页先卡死一下。现在判断和取值全部丢进后台，主线程只收一个 Int。
     private func warmUp() async {
-        if LocalIndex.shared.isReady {
-            indexCount = LocalIndex.shared.totalCount
-            indexReady = true
-            loadingIndex = false
-            return
-        }
-        let n = await Task.detached(priority: .utility) { LocalIndex.shared.totalCount }.value
+        let n = await Task.detached(priority: .utility) {
+            LocalIndex.shared.isReady ? LocalIndex.shared.totalCount : 0
+        }.value
         indexCount = n
         indexReady = n > 0
         loadingIndex = false

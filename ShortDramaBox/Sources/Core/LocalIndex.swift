@@ -38,6 +38,9 @@ final class LocalIndex {
     private var epsOff = 0
     private var tagCountsOff = 0
     private var tagRefsOff = 0
+    /// 每条记录在 tagRefs 里的起始下标（前缀和）。
+    /// 标签引用是变长的，不预计算的话每次取标签都要从第 0 条累加到目标下标。
+    private var tagPrefix: [Int32] = []
     private var titleBlobLen = 0
 
     private var loadFailed = false
@@ -120,7 +123,22 @@ final class LocalIndex {
         epsOff = coversOff + n * 16
         tagCountsOff = epsOff + n * 2
         tagRefsOff = tagCountsOff + n
-        guard idsOff <= out.count, coversOff <= out.count, epsOff <= out.count, tagCountsOff <= out.count else { return }
+        guard idsOff <= out.count, coversOff <= out.count, epsOff <= out.count,
+              tagCountsOff + n <= out.count else { return }
+
+        // 一次扫出前缀和：装载时 O(count)，换掉之后每次查询的 O(index)
+        var pref = [Int32](repeating: 0, count: n + 1)
+        out.withUnsafeBytes { p in
+            var acc: Int32 = 0
+            var i = 0
+            while i < n {
+                pref[i] = acc
+                acc += Int32(p.loadUnaligned(fromByteOffset: tagCountsOff + i, as: UInt8.self))
+                i += 1
+            }
+            pref[n] = acc
+        }
+        tagPrefix = pref
 
         tagTable = tags
         count = n
@@ -143,7 +161,7 @@ final class LocalIndex {
         let ep = d.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: epsOff + index * 2, as: UInt16.self) }
         var cover = ""
         if coversOff + (index + 1) * 16 <= d.count {
-            let hex = d[(coversOff + index * 16)..<(coversOff + index * 16 + 16)].map { String(format: "%02x", $0) }.joined()
+            let hex = Self.hex(d[(coversOff + index * 16)..<(coversOff + index * 16 + 16)])
             if hex != String(repeating: "0", count: 32) {
                 cover = Self.coverHost + hex + Self.coverTail
             }
@@ -154,15 +172,25 @@ final class LocalIndex {
         return s
     }
 
+    /// 字节转十六进制。String(format:) 每次要 1μs 量级，
+    /// 一条记录 16 个字节、一次搜索几百条就是几千次，查表几乎免费。
+    private static let hexChars: [UInt8] = Array("0123456789abcdef".utf8)
+    private static func hex<S: Sequence>(_ bytes: S) -> String where S.Element == UInt8 {
+        var out = [UInt8]()
+        out.reserveCapacity(32)
+        for b in bytes {
+            out.append(hexChars[Int(b >> 4)])
+            out.append(hexChars[Int(b & 0x0F)])
+        }
+        return String(decoding: out, as: UTF8.self)
+    }
+
     private func tags(at index: Int) -> [String] {
         guard let d = data, tagCountsOff + index < d.count, !tagTable.isEmpty else { return [] }
         let n = Int(d[tagCountsOff + index])
         guard n > 0 else { return [] }
-        var base = 0
-        d.withUnsafeBytes { p in
-            var i = 0
-            while i < index { base += Int(p.loadUnaligned(fromByteOffset: tagCountsOff + i, as: UInt8.self)); i += 1 }
-        }
+        guard index + 1 < tagPrefix.count else { return [] }
+        let base = Int(tagPrefix[index])
         var out: [String] = []
         out.reserveCapacity(n)
         d.withUnsafeBytes { p in

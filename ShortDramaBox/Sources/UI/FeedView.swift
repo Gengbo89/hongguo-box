@@ -84,7 +84,10 @@ final class FeedModel: ObservableObject {
     @Published private(set) var poolNote = ""
 
     private var inFlight: Set<String> = []
-    private let prefetchAhead = 2
+    private var tasks: [String: Task<Void, Never>] = [:]
+    private var paused = false
+    private var currentIndex = 0
+    private let prefetchAhead = 1
 
     /// 推荐池：优先用全量索引（几百上千部），没有就用首页那几十部
     func load() async {
@@ -132,10 +135,36 @@ final class FeedModel: ObservableObject {
 
     /// 把离当前位置太远的待办丢掉，避免滑太久后一堆任务堆积
     func prepare(_ index: Int) {
+        currentIndex = index
+        guard !paused else { return }
         guard items.indices.contains(index) else { return }
         for k in index...(index + prefetchAhead) where items.indices.contains(k) {
             prepareOne(k)
         }
+    }
+
+    /// 切走这个 Tab：把预取全部停掉。
+    /// 不停的话，人在详情页/选集页时后台还在下两三路 1080p，
+    /// 带宽被占满，拉详情就「加载老半天」。
+    func pause() {
+        paused = true
+        for (_, t) in tasks { t.cancel() }
+        tasks.removeAll()
+        inFlight.removeAll()
+        for i in items.indices {
+            switch items[i].status {
+            case .resolving, .downloading:
+                items[i].status = .pending   // 恢复时会重新解析，已缓存的会秒开
+            default:
+                break
+            }
+        }
+    }
+
+    /// 切回来：从当前这一页重新排预取
+    func resume() {
+        paused = false
+        prepare(currentIndex)
     }
 
     /// 从播放器回来后重新解析这一页，让它接着新进度播
@@ -146,6 +175,7 @@ final class FeedModel: ObservableObject {
     }
 
     private func prepareOne(_ i: Int) {
+        guard !paused else { return }
         guard items.indices.contains(i) else { return }
         switch items[i].status {
         case .ready, .downloading, .resolving: return
@@ -156,22 +186,24 @@ final class FeedModel: ObservableObject {
         inFlight.insert(item.series.id)
         items[i].status = .resolving
 
-        Task { [weak self] in
+        let t = Task { [weak self] in
             guard let self else { return }
             await self.resolve(i)
         }
+        tasks[item.series.id] = t
     }
 
     private func resolve(_ i: Int) async {
         guard items.indices.contains(i) else { return }
         let series = items[i].series
-        defer { inFlight.remove(series.id) }
+        defer { inFlight.remove(series.id); tasks.removeValue(forKey: series.id) }
+        guard !Task.isCancelled else { return }
 
         // 详情（拿集数）
         guard let (full, eps) = try? await Catalog.detail(series.id), !eps.isEmpty else {
             setStatus(i, .failed("暂无片源")); return
         }
-        guard items.indices.contains(i) else { return }
+        guard items.indices.contains(i), !Task.isCancelled else { return }
 
         // 简介只有详情接口才有（内置索引里没存，省体积），补进这一页
         if items[i].series.intro.isEmpty, !full.intro.isEmpty {
@@ -192,6 +224,7 @@ final class FeedModel: ObservableObject {
 
         // 取流：全部档位都要，播不了的留给本机转码
         let tracks = await PlayerAPI.allTracks(for: ep.vid)
+        guard !Task.isCancelled else { return }
         guard let best = Self.pick(tracks) else {
             setStatus(i, .failed("无可用清晰度")); return
         }
@@ -204,9 +237,10 @@ final class FeedModel: ObservableObject {
                 vid: ep.vid, track: best, pool: tracks) { p in
                 Task { @MainActor in self.setStatus(i, .downloading(p)) }
             }
-            guard items.indices.contains(i) else { return }
+            guard items.indices.contains(i), !Task.isCancelled else { return }
             setStatus(i, .ready(url))
         } catch {
+            guard !Task.isCancelled else { return }
             setStatus(i, .failed("加载失败"))
         }
     }
@@ -239,22 +273,33 @@ private struct FeedCard: View {
     @State private var liked = false
     @State private var showQuality = false
     @State private var ended: NSObjectProtocol?
+    /// 画面填充（true=铺满可能裁边 / false=完整显示留黑边），与播放器页共用同一个设置
+    @AppStorage("video_fill") private var videoFill = true
 
     var body: some View {
         ZStack {
             Color.black
 
             // 封面（视频没准备好时铺底）
-            AsyncImage(url: URL(string: item.series.cover)) { phase in
-                if let img = phase.image {
-                    img.resizable().aspectRatio(contentMode: .fill)
-                } else { Color.black }
-            }
-            .overlay(Color.black.opacity(player == nil ? 0.1 : 0.55))
-            .clipped()
+            //
+            // 必须用 Color.clear + overlay 把这一层的尺寸钉死在容器上。
+            // 直接把 .fill 的图片塞进 ZStack，图片会按自身宽高比把 ZStack 撑大
+            // （竖屏 3:4 的封面在 9:19.5 的屏幕上会撑宽 60%），
+            // 于是播放层和底部文字全部跟着偏移、被推出屏幕 —— 这就是「出画」。
+            // 注意 .clipped() 只裁绘制、不裁布局，光加它一点用都没有。
+            Color.clear
+                .overlay {
+                    AsyncImage(url: URL(string: item.series.cover)) { phase in
+                        if let img = phase.image {
+                            img.resizable().aspectRatio(contentMode: .fill)
+                        } else { Color.black }
+                    }
+                }
+                .clipped()
+                .overlay(Color.black.opacity(player == nil ? 0.1 : 0.55))
 
             if let p = player {
-                PlayerLayerView(player: p, fill: true)
+                Color.clear.overlay { PlayerLayerView(player: p, fill: videoFill) }
             } else {
                 loadingOverlay
             }
@@ -295,6 +340,12 @@ private struct FeedCard: View {
                 Button(action: onDetail) {
                     sideIcon("list.bullet", "选集")
                 }
+                // 画面不合胃口时能当场切换：铺满(裁边) / 适应(留黑边)
+                Button { videoFill.toggle() } label: {
+                    sideIcon(videoFill ? "rectangle.expand.vertical"
+                                       : "rectangle.arrowtriangle.2.inward",
+                             videoFill ? "铺满" : "适应")
+                }
             }
             .padding(.trailing, 14)
             .frame(maxWidth: .infinity, alignment: .trailing)
@@ -333,6 +384,7 @@ private struct FeedCard: View {
             )
             .allowsHitTesting(false)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
         .onChange(of: isActive) { active in
             if active { start() } else { player?.pause() }
@@ -408,6 +460,9 @@ private struct PlayTarget: Identifiable {
 }
 
 struct FeedView: View {
+    /// 本 Tab 是否在前台。切走时停掉后台预取，别在背后抢带宽
+    var active: Bool = true
+
     @StateObject private var model = FeedModel()
     @State private var scrolledID: Int?
     @State private var open: FeedItem?
@@ -430,6 +485,9 @@ struct FeedView: View {
             }
         }
         .task { if model.items.isEmpty { await model.load() } }
+        .onChange(of: active) { a in
+            if a { model.resume() } else { model.pause() }
+        }
         // 右侧「选集」才进详情页
         .sheet(item: $open) { it in
             NavigationStack { DetailView(series: it.series) }
@@ -478,7 +536,7 @@ struct FeedView: View {
         ScrollView(.vertical) {
             LazyVStack(spacing: 0) {
                 ForEach(Array(model.items.enumerated()), id: \.element.id) { i, it in
-                    FeedCard(item: it, isActive: i == index,
+                    FeedCard(item: it, isActive: i == index && active,
                              onPlay: { startPlay(i) },
                              onDetail: { open = it })
                         .containerRelativeFrame([.horizontal, .vertical])

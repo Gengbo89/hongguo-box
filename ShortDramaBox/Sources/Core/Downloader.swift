@@ -1,5 +1,94 @@
 import Foundation
 
+/// 单次下载：用 URLSessionDownloadTask 边下边写盘，同时汇报进度。
+///
+/// 之前用 `URLSession.bytes(for:)` 逐字节 async 迭代（每次 await 只出 1 个字节），
+/// 一个几十 MB 的 1080p 剧集要几千万次 async 恢复；而且整段视频先攒在内存里再落盘，
+/// 推荐页再并发预取几路，内存直接几百 MB —— 卡就卡在这里。
+private final class FileDownloader: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let expected: Int64
+    private let dest: URL
+    private let onProgress: @Sendable (Double) -> Void
+    private let lock = NSLock()
+    private var cont: CheckedContinuation<URL, Error>?
+    private var session: URLSession?
+
+    init(expected: Int64, dest: URL, onProgress: @escaping @Sendable (Double) -> Void) {
+        self.expected = expected
+        self.dest = dest
+        self.onProgress = onProgress
+    }
+
+    func run(_ request: URLRequest) async throws -> URL {
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<URL, Error>) in
+            lock.lock(); cont = c; lock.unlock()
+            let s = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+            lock.lock(); session = s; lock.unlock()
+            s.downloadTask(with: request).resume()
+        }
+    }
+
+    /// 只允许收尾一次；顺手把 session 作废，断开它对 delegate 的强引用
+    private func finish(_ result: Result<URL, Error>) {
+        lock.lock()
+        let c = cont; cont = nil
+        let s = session; session = nil
+        lock.unlock()
+        s?.finishTasksAndInvalidate()
+        c?.resume(with: result)
+    }
+
+    func urlSession(_ s: URLSession, downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
+                    totalBytesExpectedToWrite: Int64) {
+        let t = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : expected
+        guard t > 0 else { onProgress(0.4); return }
+        onProgress(min(0.9, Double(totalBytesWritten) / Double(t) * 0.9))
+    }
+
+    func urlSession(_ s: URLSession, downloadTask: URLSessionDownloadTask,
+                    didFinishDownloadingTo location: URL) {
+        if let h = downloadTask.response as? HTTPURLResponse, h.statusCode != 200 {
+            finish(.failure(ApiError.http(h.statusCode))); return
+        }
+        do {
+            try? FileManager.default.removeItem(at: dest)
+            try FileManager.default.moveItem(at: location, to: dest)
+            finish(.success(dest))
+        } catch {
+            finish(.failure(error))
+        }
+    }
+
+    func urlSession(_ s: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard let error else { return }
+        finish(.failure(error))
+    }
+}
+
+/// 全局下载闸门：同时最多 2 路。
+actor DownloadGate {
+    static let shared = DownloadGate(limit: 2)
+    private let limit: Int
+    private var active = 0
+    private var queue: [CheckedContinuation<Void, Never>] = []
+
+    init(limit: Int) { self.limit = limit }
+
+    func acquire() async {
+        if active < limit { active += 1; return }
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            queue.append(c)
+        }
+        active += 1
+    }
+
+    func release() {
+        active -= 1
+        if !queue.isEmpty { queue.removeFirst().resume() }
+    }
+}
+
 /// 下载 -> 解密 -> 去 CENC -> 缓存为可播放 mp4
 enum MediaStore {
     static var dir: URL {
@@ -51,47 +140,58 @@ enum MediaStore {
             progress(1.0); return c
         }
         guard let url = URL(string: track.url) else { throw ApiError.badURL }
-        var r = URLRequest(url: url)
-        r.timeoutInterval = 60
-        r.setValue(BROWSER_UA, forHTTPHeaderField: "User-Agent")
-        let (bytes, resp) = try await URLSession.shared.bytes(for: r)
-        if let h = resp as? HTTPURLResponse, h.statusCode != 200 { throw ApiError.http(h.statusCode) }
-        let total = max(resp.expectedContentLength, Int64(track.size))
-        var data = Data(); data.reserveCapacity(Int(max(total, 1)))
-        var lastTick = 0
-        for try await b in bytes {
-            data.append(b)
-            if data.count - lastTick > 262_144 {
-                lastTick = data.count
-                progress(total > 0 ? min(0.9, Double(data.count) / Double(total) * 0.9) : 0.4)
-            }
+
+        await DownloadGate.shared.acquire()
+        let staged: URL
+        do {
+            staged = try await download(url, expect: Int64(track.size), progress: progress)
+        } catch {
+            await DownloadGate.shared.release()
+            throw error
         }
-        guard !data.isEmpty else { throw ApiError.noData }
+        await DownloadGate.shared.release()
+        defer { try? FileManager.default.removeItem(at: staged) }
         progress(0.92)
 
         // 公开备用源是明文，直接落盘，跳过解密与去 CENC
         if track.spadeA.isEmpty {
             let plain = cachedPath(vid: vid, definition: track.definition)
-            try data.write(to: plain)
+            try? FileManager.default.removeItem(at: plain)
+            try FileManager.default.moveItem(at: staged, to: plain)
             pruneIfNeeded()
             progress(1.0)
             return plain
         }
 
-        // 写临时密文 -> 解密 -> 去 CENC
-        let tmp = dir.appendingPathComponent("tmp_\(UUID().uuidString).mp4")
-        try data.write(to: tmp)
-        defer { try? FileManager.default.removeItem(at: tmp) }
+        // 临时密文 -> 解密 -> 去 CENC
         guard let key = spadeToKey(track.spadeA) else { throw ApiError.noData }
-        let dec = tmp.appendingPathExtension("dec.mp4")
-        let stats = decryptAV(tmp.path, keyHex: key, outPath: dec.path)
+        let dec = staged.appendingPathExtension("dec.mp4")
         defer { try? FileManager.default.removeItem(at: dec) }
+        let stats = decryptAV(staged.path, keyHex: key, outPath: dec.path)
         guard let v = stats["vide"], v.0 > 0 else { throw ApiError.noData }
         progress(0.97)
         let out = cachedPath(vid: vid, definition: track.definition)
         _ = stripCENC(dec.path, outPath: out.path)
         pruneIfNeeded()
         progress(1.0)
+        return out
+    }
+
+    /// 下载到本地临时文件（边下边写盘，不在内存里攒整段视频）
+    private static func download(_ url: URL, expect: Int64,
+                                 progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
+        var r = URLRequest(url: url)
+        r.timeoutInterval = 120
+        r.setValue(BROWSER_UA, forHTTPHeaderField: "User-Agent")
+        let staged = dir.appendingPathComponent("dl_\(UUID().uuidString).mp4")
+        let d = FileDownloader(expected: expect, dest: staged, onProgress: progress)
+        let out = try await d.run(r)
+        let attrs = try? FileManager.default.attributesOfItem(atPath: out.path)
+        let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+        guard size > 0 else {
+            try? FileManager.default.removeItem(at: out)
+            throw ApiError.noData
+        }
         return out
     }
 
