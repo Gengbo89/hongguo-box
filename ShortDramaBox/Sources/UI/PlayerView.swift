@@ -204,6 +204,7 @@ private struct EpisodePage: View {
     let speed: Float
     let forceQuality: String?
     var onQuality: (String) -> Void
+    var onTracks: ([VideoTrack]) -> Void
     var onEnded: () -> Void
 
     @State private var player: AVPlayer?
@@ -258,12 +259,17 @@ private struct EpisodePage: View {
         player?.pause(); player = nil
     }
 
+    /// 选定要播的档位。
+    /// - 手动指定清晰度时，**不做任何编解码过滤** —— 源站给了就认，播不了交给本机转码
+    /// - 自动选择时优先能直接播的最高清晰度（省掉转码等待）
+    /// 传入的 list 已按清晰度从高到低排好。
     private static func pick(_ list: [VideoTrack], force: String?) -> VideoTrack? {
-        let ok = list.filter { PlayerAPI.isPlayableCodec($0.codec) }
-        let pool = ok.isEmpty ? list : ok
-        if let f = force, let t = pool.first(where: { $0.definition == f }) { return t }
-        if let p = pool.last(where: { $0.definition.contains("1080") }) { return p }
-        return pool.last
+        if let f = force, let t = list.first(where: { $0.definition == f }) { return t }
+        let ok = PlayerAPI.playable(list)
+        if let p = ok.first(where: { $0.definition.contains("1080") }) { return p }
+        if let f = ok.first { return f }
+        // 一条都直接播不了：挑最高清晰度并本机转码
+        return list.first
     }
 
     private func start(force: Bool = false) async {
@@ -276,19 +282,27 @@ private struct EpisodePage: View {
 
         do {
             if tracks.isEmpty {
-                tracks = await PlayerAPI.tracks(for: episode.vid)
+                // 取全部档位：一条都不过滤，播不了的留到后面本机转码
+                tracks = await PlayerAPI.allTracks(for: episode.vid)
                 if tracks.isEmpty {
                     status = "该集暂无可用片源"; failed = true; return
                 }
             }
+            onTracks(tracks)
             guard let best = Self.pick(tracks, force: forceQuality) else {
                 status = "无可用清晰度"; failed = true; return
             }
             onQuality(best.definition)
+            let transcoding = PlayerAPI.needsTranscode(best)
 
-            let url = try await MediaStore.prepare(vid: episode.vid, track: best) { p in
+            let url = try await MediaStore.prepareForPlayback(
+                vid: episode.vid, track: best, pool: tracks) { p in
                 Task { @MainActor in
-                    progress = p; status = "下载并解密中 \(Int(p * 100))%"
+                    progress = p
+                    let pct = Int(p * 100)
+                    status = transcoding
+                        ? "本机转码 \(best.definition) \(pct)%"
+                        : "下载并解密中 \(pct)%"
                 }
             }
             let p = AVPlayer(url: url)
