@@ -26,7 +26,7 @@ enum UpdateState: Equatable {
     case idle
     case checking
     case latest                       // 已是最新
-    case newer(String, String)        // 有新版本（标签, 下载页）
+    case newer(String)                // 有新版本（标签，如 build-16）
     case failed(String)
 }
 
@@ -37,18 +37,6 @@ final class UpdateChecker: ObservableObject {
 
     static let repo = "Gengbo89/hongguo-box"
     static var releasesPage: String { "https://github.com/\(repo)/releases" }
-
-    /// SideStore / AltStore 侧载源地址。
-    /// 在 SideStore 里加一次这个源，之后有新版本 SideStore 会自己提示，手机上点一下就装好。
-    /// 走 releases/latest/download：github.com 国内实测可达，
-    /// 而 raw.githubusercontent.com / jsDelivr 实测都连不上，不能用。
-    static let sourceURL = "https://github.com/\(repo)/releases/latest/download/apps.json"
-    static let sidestoreSite = "https://sidestore.io"
-
-    /// 最新 release 的下载直链（未签名 IPA）
-    static func ipaURL(tag: String) -> String {
-        "https://github.com/\(repo)/releases/download/\(tag)/ShortDramaBox-unsigned.ipa"
-    }
 
     func check() async {
         state = .checking
@@ -67,7 +55,7 @@ final class UpdateChecker: ObservableObject {
             }
             let n = Int(tag.replacingOccurrences(of: "build-", with: "")) ?? 0
             if n > AppVersion.buildNumber {
-                state = .newer(tag, Self.ipaURL(tag: tag))
+                state = .newer(tag)
             } else {
                 state = .latest
             }
@@ -104,13 +92,13 @@ final class UpdateChecker: ObservableObject {
 struct AboutView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var checker = UpdateChecker()
-    @State private var copied = false
 
     var body: some View {
         NavigationStack {
             List {
                 Section("版本") {
                     LabeledContent("当前版本", value: AppVersion.display)
+                    LabeledContent("构建号", value: AppVersion.build)
                     LabeledContent("应用标识", value: "com.duanju.box")
                 }
 
@@ -130,16 +118,12 @@ struct AboutView: View {
                     case .latest:
                         Label("已是最新版本", systemImage: "checkmark.circle.fill")
                             .foregroundStyle(.green).font(.footnote)
-                    case .newer(let tag, let url):
-                        VStack(alignment: .leading, spacing: 8) {
+                    case .newer(let tag):
+                        VStack(alignment: .leading, spacing: 6) {
                             Label("有新版本 \(tag)", systemImage: "sparkles")
                                 .foregroundStyle(.pink).font(.footnote)
-                            if let u = URL(string: url) {
-                                Link("下载新版本 IPA", destination: u).font(.footnote)
-                            }
-                            if let u = URL(string: UpdateChecker.releasesPage) {
-                                Link("打开发布页", destination: u).font(.footnote)
-                            }
+                            Text("手机上装不了，需要在电脑上用 Sideloadly 覆盖安装。")
+                                .font(.footnote).foregroundStyle(.secondary)
                         }
                     case .failed(let msg):
                         Text(msg).font(.footnote).foregroundStyle(.orange)
@@ -148,43 +132,18 @@ struct AboutView: View {
                     }
                 }
 
-                Section("如何更新") {
-                    Text("iOS 不允许 App 自己安装更新（App 改不了自己的安装包），所以「检查更新」只能告诉你有没有新版、把安装包地址给你。真正装上必须由外部安装器来做。")
-                        .font(.footnote).foregroundStyle(.secondary)
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label("方式一：SideStore（不用电脑，推荐）", systemImage: "1.circle.fill")
-                            .font(.footnote).foregroundStyle(.pink)
-                        Text("在 SideStore 里加一次下面的源，以后它自己就会提示有新版本，手机上点一下「更新」就装好了，观看记录保留。")
-                            .font(.footnote)
-                        Text(UpdateChecker.sourceURL)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(3)
-                        Button {
-                            #if canImport(UIKit)
-                            UIPasteboard.general.string = UpdateChecker.sourceURL
-                            #endif
-                            copied = true
-                        } label: {
-                            Label(copied ? "已拷贝" : "拷贝源地址",
-                                  systemImage: copied ? "checkmark.circle.fill" : "doc.on.doc")
-                                .font(.footnote)
-                        }
-                        if let u = URL(string: UpdateChecker.sidestoreSite) {
-                            Link("SideStore 官网（初次安装需要一台电脑）", destination: u)
-                                .font(.footnote)
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label("方式二：Sideloadly（电脑覆盖安装）", systemImage: "2.circle.fill")
-                            .font(.footnote)
-                        Text("点上面的「检查更新」，下载新 IPA，用 Sideloadly 装到手机上。不要先删掉旧 App，直接覆盖，记录和缓存都在。")
-                            .font(.footnote)
-                    }
-
-                    Text("免费 Apple ID 签的 App 每 7 天过期，重装或让 SideStore 后台刷新即可。")
+                Section("怎么更新") {
+                    Text("1. 在电脑上打开下面这个发布页，下载最新的 ShortDramaBox-unsigned.ipa")
+                        .font(.footnote)
+                    Text("2. 拖进 Sideloadly，填 Apple ID，点 Start")
+                        .font(.footnote)
+                    Text("3. 不要先删手机上的旧 App，直接覆盖装，观看记录和缓存都会保留")
+                        .font(.footnote)
+                    Text(UpdateChecker.releasesPage)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                    Text("免费 Apple ID 签的 App 每 7 天过期，重跑一次 Sideloadly 续期即可。")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }

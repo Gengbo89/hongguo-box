@@ -74,67 +74,9 @@ jobs:
             shasum -a 256 ShortDramaBox-unsigned.ipa
           } > ipa-manifest.txt
           cat ipa-manifest.txt
-
-          # 图标提到仓库根，作为 Release 资源发布（raw.githubusercontent 国内实测不可达）
-          cp ShortDramaBox/Sources/Assets.xcassets/AppIcon.appiconset/icon-1024.png icon-1024.png
-
-          # 生成 SideStore/AltStore 侧载源 apps.json
-          # 源地址固定走 releases/latest/download，用户只需加一次
-          VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
-          MINOS=$(/usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP/Info.plist")
-          SIZE=$(stat -f%z ShortDramaBox-unsigned.ipa)
-          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          TAG="build-${GITHUB_RUN_NUMBER}"
-          BASE="https://github.com/Gengbo89/hongguo-box"
-          DL="${BASE}/releases/download/${TAG}/ShortDramaBox-unsigned.ipa"
-          SRC="${BASE}/releases/latest/download/apps.json"
-          ICON="${BASE}/releases/latest/download/icon-1024.png"
-          cat > apps.json <<EOF
-          {
-            "name": "短剧盒子",
-            "identifier": "com.duanju.box.source",
-            "sourceURL": "${SRC}",
-            "subtitle": "短剧盒子自用侧载源",
-            "description": "短剧盒子 iOS 测试版的更新源。加一次，以后有新版本直接在 SideStore 里点更新，不用电脑。",
-            "iconURL": "${ICON}",
-            "tintColor": "#F54F32",
-            "featuredApps": ["com.duanju.box"],
-            "apps": [
-              {
-                "name": "短剧盒子",
-                "bundleIdentifier": "com.duanju.box",
-                "developerName": "自用测试版",
-                "subtitle": "短剧播放器（第三方客户端）",
-                "localizedDescription": "首页推荐、分类、搜索、选集、1080p 播放，支持上下滑切集与倍速。仅供个人自用。",
-                "iconURL": "${ICON}",
-                "tintColor": "#F54F32",
-                "category": "entertainment",
-                "version": "${VER}",
-                "versionDate": "${NOW}",
-                "downloadURL": "${DL}",
-                "size": ${SIZE},
-                "absoluteVersion": "${VER}",
-                "appID": "com.duanju.box",
-                "versions": [
-                  {
-                    "version": "${VER}",
-                    "date": "${NOW}",
-                    "downloadURL": "${DL}",
-                    "size": ${SIZE},
-                    "minOSVersion": "${MINOS}",
-                    "localizedDescription": "构建 ${GITHUB_RUN_NUMBER}"
-                  }
-                ]
-              }
-            ],
-            "news": []
-          }
-          EOF
-          python3 -c "import json;d=json.load(open('apps.json'));print('apps.json 校验通过，版本',d['apps'][0]['version'])"
-
           git config user.email "ci@users.noreply.github.com"
           git config user.name "ci"
-          git add -f ipa-manifest.txt apps.json
+          git add -f ipa-manifest.txt
           git commit -q -m "ci: IPA 清单 [skip ci]" || true
           git pull --rebase -q origin main || true
           git push || true
@@ -144,10 +86,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ShortDramaBox-unsigned-ipa
-          path: |
-            ShortDramaBox-unsigned.ipa
-            apps.json
-            icon-1024.png
+          path: ShortDramaBox-unsigned.ipa
           if-no-files-found: error
           retention-days: 30
 
@@ -158,29 +97,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="build-${GITHUB_RUN_NUMBER}"
-          SRC="https://github.com/Gengbo89/hongguo-box/releases/latest/download/apps.json"
-          NOTES="未签名 IPA。两种安装/更新方式，二选一：
-
-          【方式一 · SideStore，不用电脑，推荐】
-          装好 SideStore 后，在 Sources 里加上这个源地址（只需加一次）：
-          ${SRC}
-          以后有新版本，SideStore 会自己提示，手机上点一下「更新」就装好，观看记录保留。
-
-          【方式二 · Sideloadly，电脑覆盖安装】
-          下载下面的 ShortDramaBox-unsigned.ipa，拖进 Sideloadly，填入 Apple ID，Start。
+          NOTES="未签名 IPA，用 Sideloadly + 免费 Apple ID 安装。
+          
+          安装：下载下面的 ShortDramaBox-unsigned.ipa，拖进 Sideloadly，填入 Apple ID，Start。
           装完在 iPhone 的「设置 → 通用 → VPN 与设备管理」里信任证书。
-          不要先删旧 App，直接覆盖，数据不丢。
-
-          免费账号签名 7 天过期：重跑一次 Sideloadly 续期，或让 SideStore 后台刷新。
-          仅供个人自用。"
-          gh release create "$TAG" \
-            ShortDramaBox-unsigned.ipa apps.json icon-1024.png \
+          免费账号签名 7 天过期，重跑一次 Sideloadly 续期即可，数据不丢。"
+          gh release create "$TAG" ShortDramaBox-unsigned.ipa \
             --title "短剧盒子 iOS 测试版 build ${GITHUB_RUN_NUMBER}" \
             --notes "$NOTES" \
-            --latest || {
-              echo "release 已存在，改为覆盖上传资源"
-              gh release upload "$TAG" ShortDramaBox-unsigned.ipa apps.json icon-1024.png --clobber
-            }
-          echo "--- 侧载源直链自检 ---"
-          curl -sL -o /dev/null -w "apps.json: HTTP %{http_code}\n" "$SRC" || true
+            --latest || echo "发布失败（可能已存在）"
           gh release list | head -3
