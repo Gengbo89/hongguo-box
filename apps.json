@@ -1,10 +1,10 @@
 {
   "name": "短剧盒子",
   "identifier": "com.duanju.box.source",
-  "sourceURL": "https://raw.githubusercontent.com/Gengbo89/hongguo-box/main/apps.json",
+  "sourceURL": "https://github.com/Gengbo89/hongguo-box/releases/latest/download/apps.json",
   "subtitle": "短剧盒子自用侧载源",
   "description": "短剧盒子 iOS 测试版的更新源。加一次，以后有新版本直接在 SideStore 里点更新，不用电脑。",
-  "iconURL": "https://raw.githubusercontent.com/Gengbo89/hongguo-box/main/ShortDramaBox/Sources/Assets.xcassets/AppIcon.appiconset/icon-1024.png",
+  "iconURL": "https://github.com/Gengbo89/hongguo-box/releases/latest/download/icon-1024.png",
   "tintColor": "#F54F32",
   "featuredApps": ["com.duanju.box"],
   "apps": [
@@ -14,23 +14,23 @@
       "developerName": "自用测试版",
       "subtitle": "短剧播放器（第三方客户端）",
       "localizedDescription": "首页推荐、分类、搜索、选集、1080p 播放，支持上下滑切集与倍速。仅供个人自用。",
-      "iconURL": "https://raw.githubusercontent.com/Gengbo89/hongguo-box/main/ShortDramaBox/Sources/Assets.xcassets/AppIcon.appiconset/icon-1024.png",
+      "iconURL": "https://github.com/Gengbo89/hongguo-box/releases/latest/download/icon-1024.png",
       "tintColor": "#F54F32",
       "category": "entertainment",
-      "version": "1.0.14",
-      "versionDate": "2026-10-20T03:14:32Z",
-      "downloadURL": "https://github.com/Gengbo89/hongguo-box/releases/download/build-14/ShortDramaBox-unsigned.ipa",
-      "size": 680963,
-      "absoluteVersion": "1.0.14",
+      "version": "1.0.15",
+      "versionDate": "2026-10-20T03:31:34Z",
+      "downloadURL": "https://github.com/Gengbo89/hongguo-box/releases/download/build-15/ShortDramaBox-unsigned.ipa",
+      "size": 686355,
+      "absoluteVersion": "1.0.15",
       "appID": "com.duanju.box",
       "versions": [
         {
-          "version": "1.0.14",
-          "date": "2026-10-20T03:14:32Z",
-          "downloadURL": "https://github.com/Gengbo89/hongguo-box/releases/download/build-14/ShortDramaBox-unsigned.ipa",
-          "size": 680963,
+          "version": "1.0.15",
+          "date": "2026-10-20T03:31:34Z",
+          "downloadURL": "https://github.com/Gengbo89/hongguo-box/releases/download/build-15/ShortDramaBox-unsigned.ipa",
+          "size": 686355,
           "minOSVersion": "17.0",
-          "localizedDescription": "构建 14"
+          "localizedDescription": "构建 15"
         }
       ]
     }
