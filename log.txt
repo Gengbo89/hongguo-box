@@ -1,0 +1,6 @@
+32da448 播放器：手动选档不再过滤编码，播不了的自动本机转码补齐
+f35072f 清晰度面板列出源站全部档位并标注来源 [skip ci]
+f8e0bbb 取流不再过滤 bytevc2：全部档位保留，播不了的走本机转码 [skip ci]
+24970d8 新增本机转码器 Transcoder（HEVC 降分辨率 + AAC 直通 + 缓存）[skip ci]
+1ca5d93 probe3 [skip ci]
+225f684 ci: IPA 清单 [skip ci]
