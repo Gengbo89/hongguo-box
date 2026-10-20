@@ -51,6 +51,17 @@ struct PlayerLayerView: UIViewRepresentable {
 final class PlayerHostView: UIView {
     override static var layerClass: AnyClass { AVPlayerLayer.self }
     var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+
+    // 关键：UIKit 承载视图默认参与触摸，会吃掉上层 SwiftUI 按钮（选集等）的点击，
+    // 表现就是"点了没反应"。播放器只负责画面，不接收任何手势。
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+    }
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        isUserInteractionEnabled = false
+    }
 }
 #else
 /// 非 iOS（仅用于本机编译检查）
@@ -226,10 +237,15 @@ private struct FeedCard: View {
             .clipped()
 
             if let p = player {
-                PlayerLayerView(player: p, fill: false)
+                PlayerLayerView(player: p, fill: true)
             } else {
                 loadingOverlay
             }
+
+            // 整屏可点：点画面任意处进剧集详情
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture { onOpen() }
 
             // 清晰度角标
             if let t = item.track, player != nil {
@@ -246,6 +262,7 @@ private struct FeedCard: View {
                     Spacer()
                 }
                 .padding(.leading, 14).padding(.top, 8)
+                .allowsHitTesting(false)
             }
 
             // 右侧操作栏
@@ -285,7 +302,7 @@ private struct FeedCard: View {
                         .font(.system(size: 12)).foregroundStyle(.white.opacity(0.72))
                         .lineLimit(2)
                 }
-                Text("上滑看下一部 · 点「选集」看完整剧集")
+                Text("上滑看下一部 · 点画面进剧集")
                     .font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
             }
             .padding(.horizontal, 16).padding(.bottom, 24)
@@ -295,6 +312,7 @@ private struct FeedCard: View {
                                startPoint: .top, endPoint: .bottom)
                     .frame(height: 260).frame(maxHeight: .infinity, alignment: .bottom)
             )
+            .allowsHitTesting(false)
         }
         .clipped()
         .onChange(of: isActive) { active in
@@ -370,35 +388,34 @@ struct FeedView: View {
     private var index: Int { scrolledID ?? 0 }
 
     var body: some View {
-        GeometryReader { geo in
-            ZStack {
-                Color.black.ignoresSafeArea()
-                if model.loading {
-                    VStack(spacing: 10) {
-                        ProgressView().tint(.pink)
-                        Text("正在准备推荐…").font(.footnote).foregroundStyle(.white.opacity(0.8))
-                    }
-                } else if let e = model.error {
-                    CompatUnavailable("加载失败", systemImage: "wifi.slash", desc: e)
-                } else {
-                    pager(size: geo.size)
+        ZStack {
+            Color.black.ignoresSafeArea()
+            if model.loading {
+                VStack(spacing: 10) {
+                    ProgressView().tint(.pink)
+                    Text("正在准备推荐…").font(.footnote).foregroundStyle(.white.opacity(0.8))
                 }
+            } else if let e = model.error {
+                CompatUnavailable("加载失败", systemImage: "wifi.slash", desc: e)
+            } else {
+                pager
             }
         }
-        .ignoresSafeArea(edges: .bottom)
         .task { if model.items.isEmpty { await model.load() } }
         .sheet(item: $open) { it in
             NavigationStack { DetailView(series: it.series) }
         }
     }
 
-    /// 原生竖向分页：每页正好一屏，画面不会被裁
-    private func pager(size: CGSize) -> some View {
+    /// 原生竖向分页：每页正好一屏。
+    /// containerRelativeFrame 直接取滚动容器尺寸（不再手算 GeometryReader），
+    /// 页面高度与可见区域严格一致，切页不会错位、比例不会怪。
+    private var pager: some View {
         ScrollView(.vertical) {
             LazyVStack(spacing: 0) {
                 ForEach(Array(model.items.enumerated()), id: \.element.id) { i, it in
                     FeedCard(item: it, isActive: i == index) { open = it }
-                        .frame(width: size.width, height: size.height)
+                        .containerRelativeFrame([.horizontal, .vertical])
                         .id(i)
                 }
             }

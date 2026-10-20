@@ -32,3 +32,44 @@ struct HomeSection: Identifiable, Hashable {
     let name: String
     let items: [Series]
 }
+
+
+extension Series {
+    /// 标题里的「第N季」标记（如「第十二季」）；没有则 nil
+    var seasonMarker: String? {
+        guard let r = title.range(of: #"第[0-9一二三四五六七八九十百千零两]+季\s*$"#,
+                                 options: .regularExpression) else { return nil }
+        return String(title[r]).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// 去掉季标记后的基础片名；没有季标记返回 nil
+    var seasonBase: String? {
+        guard let r = title.range(of: #"[:：]?\s*第[0-9一二三四五六七八九十百千零两]+季\s*$"#,
+                                 options: .regularExpression) else { return nil }
+        let base = String(title[title.startIndex..<r.lowerBound])
+            .trimmingCharacters(in: CharacterSet(charactersIn: " ：:，,、·-—_"))
+        return base.count >= 2 ? base : nil
+    }
+
+    /// 「第十二季」→ 12；解析不出返回 nil
+    var seasonNumber: Int? {
+        guard let m = seasonMarker else { return nil }
+        let digits = m.filter { $0.isNumber || "一二三四五六七八九十百千零两".contains($0) }
+        guard !digits.isEmpty else { return nil }
+        return Series.chineseNumber(digits)
+    }
+
+    static func chineseNumber(_ s: String) -> Int? {
+        if let n = Int(s) { return n }
+        let d: [Character: Int] = ["零":0,"一":1,"二":2,"两":2,"三":3,"四":4,"五":5,
+                                   "六":6,"七":7,"八":8,"九":9]
+        let u: [Character: Int] = ["十":10,"百":100,"千":1000]
+        var total = 0, cur = 0
+        for ch in s {
+            if let v = d[ch] { cur = v }
+            else if let m = u[ch] { total += (cur == 0 ? 1 : cur) * m; cur = 0 }
+            else { return nil }
+        }
+        return total + cur
+    }
+}

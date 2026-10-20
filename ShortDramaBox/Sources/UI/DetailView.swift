@@ -6,6 +6,7 @@ struct DetailView: View {
     @State private var episodes: [Episode] = []
     @State private var loading = true
     @State private var play: Episode?
+    @State private var siblings: [Series] = []
     @ObservedObject private var store = WatchStore.shared
 
     init(series: Series) { self.series = series; _detail = State(initialValue: series) }
@@ -29,6 +30,7 @@ struct DetailView: View {
                 }
                 if loading { ProgressView().frame(maxWidth: .infinity) }
                 else { episodeGrid }
+                if !siblings.isEmpty { otherSeasons }
             }.padding(.vertical)
         }
         .navigationTitle(detail.title).navigationBarTitleDisplayMode(.inline)
@@ -75,6 +77,31 @@ struct DetailView: View {
         }
     }
 
+    /// 同名其它季：季是独立剧集（标题带「第N季」），用站内搜索把兄弟季找出来
+    private var otherSeasons: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("其它季（\(siblings.count)）").font(.headline).padding(.horizontal)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(siblings) { s in
+                        NavigationLink { DetailView(series: s) } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                AsyncImage(url: URL(string: s.cover)) { $0.resizable().aspectRatio(contentMode: .fill) }
+                                    placeholder: { Rectangle().fill(Color.white.opacity(0.08)) }
+                                    .frame(width: 88, height: 117)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                Text(s.seasonMarker ?? s.title)
+                                    .font(.system(size: 11)).lineLimit(2)
+                                    .frame(width: 88, alignment: .leading)
+                            }
+                        }
+                        .buttonStyle(.plain).foregroundStyle(.white)
+                    }
+                }.padding(.horizontal)
+            }
+        }
+    }
+
     private func load() async {
         loading = true
         if let (s, e) = try? await Catalog.detail(series.id) {
@@ -82,5 +109,14 @@ struct DetailView: View {
             episodes = e
         }
         loading = false
+        await loadSiblings()
+    }
+
+    private func loadSiblings() async {
+        guard let base = detail.seasonBase ?? series.seasonBase else { return }
+        guard let p = try? await SearchAPI.remote(base) else { return }
+        siblings = p.list
+            .filter { $0.id != series.id && $0.title.hasPrefix(base) }
+            .sorted { ($0.seasonNumber ?? 9999) < ($1.seasonNumber ?? 9999) }
     }
 }
