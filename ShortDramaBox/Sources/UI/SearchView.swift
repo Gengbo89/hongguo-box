@@ -25,12 +25,12 @@ struct SearchView: View {
                         Text(progressText).font(.system(size: 13)).foregroundStyle(.secondary)
                     }
                 } else if q.isEmpty {
-                    ContentUnavailableView("搜索短剧", systemImage: "magnifyingglass",
-                                           description: Text(loading
-                                               ? "已索引 \(pool.count) 部，仍在继续…\n\(progressText)"
-                                               : "已索引 \(pool.count) 部，输入片名"))
+                    CompatUnavailable("搜索短剧", systemImage: "magnifyingglass",
+                                              desc: loading
+                                                  ? "已索引 \(pool.count) 部，仍在继续…\n\(progressText)"
+                                                  : "已索引 \(pool.count) 部，输入片名")
                 } else if results.isEmpty {
-                    ContentUnavailableView.search(text: q)
+                    CompatSearchEmpty(text: q)
                 } else {
                     ScrollView {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 10)], spacing: 14) {
@@ -106,7 +106,7 @@ struct HistoryView: View {
         NavigationStack {
             Group {
                 if store.items.isEmpty {
-                    ContentUnavailableView("暂无观看记录", systemImage: "clock", description: Text("播放后会自动记录进度"))
+                    CompatUnavailable("暂无观看记录", systemImage: "clock", desc: "播放后会自动记录进度")
                 } else {
                     List {
                         ForEach(store.items) { it in

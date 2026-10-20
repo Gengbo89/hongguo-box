@@ -9,7 +9,7 @@ struct HomeView: View {
         NavigationStack {
             Group {
                 if loading { ProgressView("加载中…") }
-                else if let e = err { ContentUnavailableView("加载失败", systemImage: "wifi.slash", description: Text(e)) }
+                else if let e = err { CompatUnavailable("加载失败", systemImage: "wifi.slash", desc: e) }
                 else { list }
             }
             .navigationTitle("短剧盒子")
