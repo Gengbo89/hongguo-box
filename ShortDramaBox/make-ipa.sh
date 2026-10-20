@@ -29,13 +29,18 @@ if [ -f "$PBX" ] && grep -q "objectVersion = 77" "$PBX"; then
   echo "==> 已把工程格式从 77 降到 56（兼容 Xcode 15.4）"
 fi
 
-echo "==> 编译（未签名 Release）"
+# 版本号：CI 传 BUILD_NUMBER（第几次构建），本地默认 0
+BUILD_NUMBER="${BUILD_NUMBER:-0}"
+VER="${MARKETING_VERSION:-1.0.$BUILD_NUMBER}"
+echo "==> 编译（未签名 Release）版本 $VER（构建 $BUILD_NUMBER）"
 xcodebuild \
   -project ShortDramaBox.xcodeproj \
   -scheme ShortDramaBox \
   -sdk iphoneos \
   -configuration Release \
   -derivedDataPath "$DD" \
+  MARKETING_VERSION="$VER" \
+  CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY="" CODE_SIGN_ENTITLEMENTS="" \
   build

@@ -4,6 +4,7 @@ struct HomeView: View {
     @State private var sections: [HomeSection] = []
     @State private var err: String?
     @State private var loading = true
+    @State private var showAbout = false
 
     var body: some View {
         NavigationStack {
@@ -13,6 +14,14 @@ struct HomeView: View {
                 else { list }
             }
             .navigationTitle("短剧盒子")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { showAbout = true } label: {
+                        Image(systemName: "info.circle")
+                    }
+                }
+            }
+            .sheet(isPresented: $showAbout) { AboutView() }
             .task { await load() }
         }
     }

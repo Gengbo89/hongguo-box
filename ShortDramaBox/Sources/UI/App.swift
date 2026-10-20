@@ -13,6 +13,7 @@ struct DuanjuApp: App {
 struct RootView: View {
     var body: some View {
         TabView {
+            FeedView().tabItem { Label("推荐", systemImage: "play.rectangle.fill") }
             HomeView().tabItem { Label("首页", systemImage: "house.fill") }
             BrowseView().tabItem { Label("分类", systemImage: "square.grid.2x2.fill") }
             SearchView().tabItem { Label("搜索", systemImage: "magnifyingglass") }

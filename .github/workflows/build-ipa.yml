@@ -27,7 +27,7 @@ jobs:
       - name: 打包未签名 IPA
         run: |
           set +e
-          ./ShortDramaBox/make-ipa.sh ShortDramaBox-unsigned.ipa > /tmp/build.log 2>&1
+          BUILD_NUMBER="${{ github.run_number }}" ./ShortDramaBox/make-ipa.sh ShortDramaBox-unsigned.ipa > /tmp/build.log 2>&1
           code=$?
           echo "exit=$code"
           if [ $code -ne 0 ]; then

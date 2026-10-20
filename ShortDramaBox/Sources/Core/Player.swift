@@ -88,11 +88,26 @@ enum PlayerAPI {
         return t
     }
 
+    /// 该编码能否被 AVFoundation 解码。
+    /// bytevc1 → MP4 里是 hvc1（标准 HEVC），AVPlayer / Safari 都能解。
+    /// bytevc2 → MP4 里是 bvc2（字节自研私有编码），AVFoundation 明确报 isDecodable=false，
+    ///           选了必然黑屏，所以一律过滤掉。
+    static func isPlayableCodec(_ codec: String) -> Bool {
+        let c = codec.lowercased()
+        if c.isEmpty { return true }              // 编码未知时不武断排除
+        return c == "bytevc1" || c == "hvc1" || c == "hev1" || c == "avc1" || c == "avc3"
+    }
+
     /// 统一取流：游客接口优先，失败才回退公开源
     static func tracks(for vid: String) async -> [VideoTrack] {
         // 偶发失败时重试，避免直接掉到 360p 备用源
         for attempt in 0..<3 {
-            if let t = try? await videoModel(vid), !t.isEmpty { return t }
+            if let t = try? await videoModel(vid), !t.isEmpty {
+                let ok = t.filter { isPlayableCodec($0.codec) }
+                if !ok.isEmpty { return ok }
+                // 全是不支持的私有编码：继续走备用源，别把黑屏片源交出去
+                break
+            }
             if attempt < 2 { try? await Task.sleep(nanoseconds: 700_000_000) }
         }
         if let f = await publicFallback(vid) { return [f] }
