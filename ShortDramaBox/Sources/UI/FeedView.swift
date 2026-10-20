@@ -490,7 +490,15 @@ private struct FeedCard: View {
         .onChange(of: isActive) { active in
             if active { start() } else { player?.pause() }
         }
-        .onChange(of: item.status) { _ in syncPlayer() }
+        // 片源就绪后自动起播。
+        // 原来挂在 .onChange(of: item.status) 上：下载过程中每报一次进度 status
+        // 就变一次、每次都要比一遍，而且就绪那一刻如果视图正在重建，这个变化
+        // 会被漏掉 —— 表现就是「进度条满了不动，上滑下滑才开播」。
+        // 改成按「就绪地址」触发：地址一变这里必定跑一次，不依赖差分。
+        .task(id: readyURL) {
+            guard readyURL != nil else { return }
+            if isActive { start() }
+        }
         .onAppear { if isActive { start() } }
         .onDisappear { teardown() }
     }
@@ -521,6 +529,12 @@ private struct FeedCard: View {
         .padding(20)
         .background(.black.opacity(0.45))
         .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+
+    /// 片源就绪后的本地地址（没就绪时为 nil），用作自动起播的触发键
+    private var readyURL: URL? {
+        if case .ready(let u) = item.status { return u }
+        return nil
     }
 
     private func start() {

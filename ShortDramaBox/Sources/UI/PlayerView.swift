@@ -223,6 +223,13 @@ private struct EpisodePage: View {
     @AppStorage("video_fit_mode") private var fitMode = 0
     /// 当前这一集的片源尺寸，交给自动判定是否该铺满
     @State private var videoSize: CGSize = .zero
+    /// 短按暂停
+    @State private var paused = false
+    /// 长按快进中
+    @State private var boosting = false
+
+    /// 长按快进的倍速
+    private static let boostRate: Float = 2.0
 
     var body: some View {
         ZStack {
@@ -235,6 +242,50 @@ private struct EpisodePage: View {
                     PlayerLayerView(player: p,
                                     fill: VideoFit.forced(fitMode),
                                     videoSize: videoSize)
+                }
+
+                // 手势层：短按暂停/继续，长按住 2x 快进、松手恢复。
+                // 用 onLongPressGesture 而不是 DragGesture(minimumDistance:0)：
+                // 后者套在分页 ScrollView 里容易和翻页抢手势，
+                // maximumDistance 让手指挪超过 30 点就直接交给翻页。
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { togglePlay() }
+                    .onLongPressGesture(
+                        minimumDuration: 0.35, maximumDistance: 30,
+                        perform: {
+                            // 已经暂停就不进快进，免得一按反而播起来
+                            guard let p = player, p.timeControlStatus == .playing else { return }
+                            boosting = true
+                            p.rate = Self.boostRate
+                        },
+                        onPressingChanged: { pressing in
+                            // 松手或手指移开 → 回原速
+                            if !pressing, boosting {
+                                boosting = false
+                                player?.rate = speed
+                            }
+                        })
+
+                if paused {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 44))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .shadow(color: .black.opacity(0.6), radius: 12)
+                        .allowsHitTesting(false)
+                }
+                if boosting {
+                    VStack {
+                        Text(String(format: "%gx 快进中", Self.boostRate))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 11).padding(.vertical, 5)
+                            .background(.black.opacity(0.55))
+                            .clipShape(Capsule())
+                            .padding(.top, 64)
+                        Spacer()
+                    }
+                    .allowsHitTesting(false)
                 }
             } else {
                 VStack(spacing: 14) {
@@ -251,7 +302,7 @@ private struct EpisodePage: View {
             }
         }
         .onChange(of: isActive) { act in
-            if act { Task { await start() } } else { player?.pause() }
+            if act { Task { await start() } } else { player?.pause(); paused = false }
         }
         .onChange(of: speed) { s in applySpeed(s) }
         .onChange(of: forceQuality) { _ in
@@ -262,12 +313,31 @@ private struct EpisodePage: View {
         .onDisappear { cleanup() }
     }
 
+    private func togglePlay() {
+        guard let p = player else { return }
+        if p.timeControlStatus == .playing {
+            p.pause()
+            paused = true
+        } else {
+            // 播完之后再点，从头开始
+            let dur = p.currentItem?.duration ?? .zero
+            if dur.isNumeric,
+               CMTimeGetSeconds(p.currentTime()) >= CMTimeGetSeconds(dur) - 0.4 {
+                p.seek(to: .zero)
+            }
+            p.play()
+            if speed != 1.0 { p.rate = speed }
+            paused = false
+        }
+    }
+
     private func applySpeed(_ s: Float) {
         player?.defaultRate = s
         if player?.timeControlStatus == .playing { player?.rate = s }
     }
 
     private func cleanup() {
+        boosting = false; paused = false
         if let o = timeObs { player?.removeTimeObserver(o); timeObs = nil }
         if let o = endObs { NotificationCenter.default.removeObserver(o); endObs = nil }
         player?.pause(); player = nil
@@ -287,7 +357,7 @@ private struct EpisodePage: View {
     }
 
     private func start(force: Bool = false) async {
-        if started && !force { applySpeed(speed); player?.play(); return }
+        if started && !force { applySpeed(speed); player?.play(); paused = false; return }
         started = true
         failed = false
         ready = false; progress = 0; status = "获取播放地址…"
@@ -333,6 +403,7 @@ private struct EpisodePage: View {
             }
             p.play()
             if speed != 1.0 { p.rate = speed }
+            paused = false
             ready = true
 
             timeObs = p.addPeriodicTimeObserver(
