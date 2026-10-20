@@ -32,7 +32,7 @@ fi
 # 版本号：CI 传 BUILD_NUMBER（第几次构建），本地默认 0
 BUILD_NUMBER="${BUILD_NUMBER:-0}"
 VER="${MARKETING_VERSION:-1.0.$BUILD_NUMBER}"
-echo "==> 编译（未签名 Release）版本 $VER（构建 $BUILD_NUMBER）"
+echo "==> 编译（未签名 Release）版本 ${VER}（构建 ${BUILD_NUMBER}）"
 xcodebuild \
   -project ShortDramaBox.xcodeproj \
   -scheme ShortDramaBox \
