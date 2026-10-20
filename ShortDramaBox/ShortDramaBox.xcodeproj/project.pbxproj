@@ -13,6 +13,7 @@
 		431616D2D8FE734BB39EA82D /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC73C871F39B7D1EBB2D0817 /* SearchView.swift */; };
 		53C4EE58974179F089F53111 /* Player.swift in Sources */ = {isa = PBXBuildFile; fileRef = B623FCB3EC77388B28666F3E /* Player.swift */; };
 		6CB2FC9FE6F8CE0D9EE74A34 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35A498C2419D6535D6CDCD1D /* Models.swift */; };
+		71FBC301E6C4FAC2F7041C9B /* CompatUnavailable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9835702878B38F5AE7E162F8 /* CompatUnavailable.swift */; };
 		87E37EB3B56D0C381530019B /* Downloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33D930E4A4401CF69D708AF2 /* Downloader.swift */; };
 		9841B6E80B18B1387B04EACC /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FD48BEE45C79A79AAD22B0F /* PlayerView.swift */; };
 		9C038DE88EEE0B77217F2224 /* API.swift in Sources */ = {isa = PBXBuildFile; fileRef = 931A5426DDEEA4095FB00D37 /* API.swift */; };
@@ -33,6 +34,7 @@
 		62FBE862AA8D0CAD14CB1962 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		6B28EF652A9C6D663A80B464 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		931A5426DDEEA4095FB00D37 /* API.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = API.swift; sourceTree = "<group>"; };
+		9835702878B38F5AE7E162F8 /* CompatUnavailable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompatUnavailable.swift; sourceTree = "<group>"; };
 		B34EACB52AD3BF53C9232C60 /* DetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailView.swift; sourceTree = "<group>"; };
 		B623FCB3EC77388B28666F3E /* Player.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Player.swift; sourceTree = "<group>"; };
 		C1EACC6BF4B4E004800F3006 /* strip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = strip.swift; sourceTree = "<group>"; };
@@ -86,6 +88,7 @@
 			isa = PBXGroup;
 			children = (
 				62FBE862AA8D0CAD14CB1962 /* App.swift */,
+				9835702878B38F5AE7E162F8 /* CompatUnavailable.swift */,
 				CB724FE8332BF8D976E6D7DC /* Components.swift */,
 				B34EACB52AD3BF53C9232C60 /* DetailView.swift */,
 				6B28EF652A9C6D663A80B464 /* HomeView.swift */,
@@ -167,6 +170,7 @@
 			files = (
 				9C038DE88EEE0B77217F2224 /* API.swift in Sources */,
 				AE7247EBF6D5B18D6A8A57AA /* App.swift in Sources */,
+				71FBC301E6C4FAC2F7041C9B /* CompatUnavailable.swift in Sources */,
 				CE00E492E72B148D21038576 /* Components.swift in Sources */,
 				1B3E9009A1F4778125754966 /* DetailView.swift in Sources */,
 				87E37EB3B56D0C381530019B /* Downloader.swift in Sources */,
@@ -236,7 +240,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -333,7 +337,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
