@@ -1,5 +1,0 @@
-=== 构建失败 exit=1 ===
---- 最后 400 行 ---
-==> 已把工程格式从 77 降到 56（兼容 Xcode 15.4）
-./ShortDramaBox/make-ipa.sh: line 35: VER�: unbound variable
---- error 行 ---
