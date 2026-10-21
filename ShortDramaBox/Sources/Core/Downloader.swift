@@ -12,6 +12,7 @@ private final class FileDownloader: NSObject, URLSessionDownloadDelegate, @unche
     private let lock = NSLock()
     private var cont: CheckedContinuation<URL, Error>?
     private var session: URLSession?
+    private var task: URLSessionDownloadTask?
 
     init(expected: Int64, dest: URL, onProgress: @escaping @Sendable (Double) -> Void) {
         self.expected = expected
@@ -20,11 +21,21 @@ private final class FileDownloader: NSObject, URLSessionDownloadDelegate, @unche
     }
 
     func run(_ request: URLRequest) async throws -> URL {
-        try await withCheckedThrowingContinuation { (c: CheckedContinuation<URL, Error>) in
-            lock.lock(); cont = c; lock.unlock()
-            let s = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
-            lock.lock(); session = s; lock.unlock()
-            s.downloadTask(with: request).resume()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (c: CheckedContinuation<URL, Error>) in
+                lock.lock(); cont = c; lock.unlock()
+                let s = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+                lock.lock(); session = s; lock.unlock()
+                let t = s.downloadTask(with: request)
+                lock.lock(); task = t; lock.unlock()
+                t.resume()
+            }
+        } onCancel: {
+            // 只取消 Swift 任务停不掉 URLSession 的下载：切走 Tab 之后后台还在继续下
+            // 1080p，进度回调一次次把条目改回 .downloading，这一页回来就永远停在
+            // 「解密中 100%」。这里把它真停掉，顺带把带宽让出来。
+            lock.lock(); let t = task; lock.unlock()
+            t?.cancel()
         }
     }
 

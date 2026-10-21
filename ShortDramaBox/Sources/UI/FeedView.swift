@@ -12,6 +12,18 @@ struct FeedItem: Identifiable {
         case ready(URL)
         case failed(String)
     }
+
+    /// 进度回调能不能盖住当前状态。
+    ///
+    /// `.ready` / `.failed` 是终态，不能被后到的进度冲掉；`.pending` 也不行 ——
+    /// 它表示「已被 pause() 收回、等着重来」，此刻还在飞的下载回调一旦写进
+    /// `.downloading`，条目就会永远停在「解密中 100%」（prepareOne 又不会再碰它）。
+    var acceptsProgress: Bool {
+        switch self {
+        case .resolving, .downloading: return true
+        case .pending, .ready, .failed: return false
+        }
+    }
     var series: Series
     var episode: Episode?
     /// 解析时顺手存下的全集列表，点画面时直接起播，不用再请求一次
@@ -175,6 +187,12 @@ enum VideoFit {
 // MARK: - 推荐流数据
 
 @MainActor
+/// 所有状态一律在主线程上改。
+///
+/// 这个类原先没有 @MainActor：resolve 在后台线程上直接写 @Published items，
+/// 而进度回调又特意 `Task { @MainActor }` 跳到主线程 —— 两条路各写各的，
+/// 最终那次 `.ready` 到底有没有落到 UI 上全看运气，表现就是卡在「解密中 100%」。
+@MainActor
 final class FeedModel: ObservableObject {
     @Published private(set) var items: [FeedItem] = []
     @Published private(set) var loading = true
@@ -272,15 +290,25 @@ final class FeedModel: ObservableObject {
         prepareOne(index)
     }
 
+    /// 这个条目该不该起一次解析。
+    ///
+    /// `.resolving` / `.downloading` 只有在「确实还有任务在跑」时才等；任务已经没了
+    /// （回调被取消或丢掉）就必须重来 —— 否则一次丢失的回写会让这一页永远卡在
+    /// 「解密中 100%」，怎么划回来都不会自己恢复。
+    nonisolated static func shouldStart(status: FeedItem.Status, inFlight: Bool) -> Bool {
+        switch status {
+        case .ready: return false
+        case .resolving, .downloading: return !inFlight
+        case .pending, .failed: return true
+        }
+    }
+
     private func prepareOne(_ i: Int) {
         guard !paused else { return }
         guard items.indices.contains(i) else { return }
-        switch items[i].status {
-        case .ready, .downloading, .resolving: return
-        case .pending, .failed: break
-        }
         let item = items[i]
-        if inFlight.contains(item.series.id) { return }
+        guard Self.shouldStart(status: item.status,
+                               inFlight: inFlight.contains(item.series.id)) else { return }
         inFlight.insert(item.series.id)
         items[i].status = .resolving
 
@@ -299,9 +327,10 @@ final class FeedModel: ObservableObject {
 
         // 详情（拿集数）
         guard let (full, eps) = try? await Catalog.detail(series.id), !eps.isEmpty else {
-            setStatus(i, .failed("暂无片源")); return
+            if isCurrent(i, series.id) { setStatus(i, .failed("暂无片源")) }
+            return
         }
-        guard items.indices.contains(i), !Task.isCancelled else { return }
+        guard isCurrent(i, series.id), !Task.isCancelled else { return }
 
         // 简介只有详情接口才有（内置索引里没存，省体积），补进这一页
         if items[i].series.intro.isEmpty, !full.intro.isEmpty {
@@ -324,20 +353,28 @@ final class FeedModel: ObservableObject {
         guard let best = Self.pick(tracks) else {
             setStatus(i, .failed("无可用清晰度")); return
         }
-        guard items.indices.contains(i) else { return }
+        guard isCurrent(i, series.id) else { return }
         items[i].track = best
 
         // 下载 + 解密（必要时本机转码）
         do {
             let url = try await MediaStore.prepareForPlayback(
                 vid: ep.vid, track: best, pool: tracks) { p in
-                Task { @MainActor in self.setStatus(i, .downloading(p)) }
+                Task { @MainActor in self.setProgress(i, seriesID: series.id, p) }
             }
-            guard items.indices.contains(i), !Task.isCancelled else { return }
+            guard items.indices.contains(i) else { return }
+            if Task.isCancelled || paused {
+                // 切走了这个 Tab、任务被取消：文件其实已经下好解密完（回来是秒开），
+                // 但这里必须落一个确定状态 —— 原来直接 return，条目就永远停在
+                // 「解密中 100%」，而 prepareOne 又不会再碰 .downloading。
+                setStatus(i, .pending)
+                return
+            }
             setStatus(i, .ready(url))
         } catch {
-            guard !Task.isCancelled else { return }
-            setStatus(i, .failed("加载失败"))
+            guard items.indices.contains(i) else { return }
+            // 取消不是错误：留成 .pending 等下次重来；真失败才报错。
+            setStatus(i, (Task.isCancelled || paused) ? .pending : .failed("加载失败"))
         }
     }
 
@@ -348,6 +385,18 @@ final class FeedModel: ObservableObject {
         let list = ok.isEmpty ? tracks : ok
         if let p = list.first(where: { $0.definition.contains("1080") }) { return p }
         return list.first
+    }
+
+    /// 这个下标现在还是不是同一部剧。load() 会把 items 整体换掉（去重 + 洗牌），
+    /// 换掉之后老的解析回调若照下标写，就写到别的剧身上了。
+    private func isCurrent(_ i: Int, _ seriesID: String) -> Bool {
+        items.indices.contains(i) && items[i].series.id == seriesID
+    }
+
+    /// 进度回写：只有还是同一部剧、且当前确实在「解析中 / 下载中」才接受。
+    private func setProgress(_ i: Int, seriesID: String, _ p: Double) {
+        guard isCurrent(i, seriesID), items[i].status.acceptsProgress else { return }
+        items[i].status = .downloading(min(max(p, 0), 1))
     }
 
     private func setStatus(_ i: Int, _ s: FeedItem.Status) {
