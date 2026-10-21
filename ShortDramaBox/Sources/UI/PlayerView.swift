@@ -435,6 +435,7 @@ private struct EpisodePage: View {
     }
 
     private func cleanup() {
+        PlaybackCenter.shared.release("ep:\(episode.vid)")
         // 拆播放器之前记住播到哪了，滑回来接着放
         if let p = player {
             let sec = p.currentTime().seconds
@@ -523,6 +524,9 @@ private struct EpisodePage: View {
             if at > 3 {
                 await p.seek(to: CMTime(seconds: at, preferredTimescale: 600))
             }
+            // 申请全局播放权：进播放页时把推荐页底下那张卡片停掉，
+            // 否则两个画面同时出声。
+            PlaybackCenter.shared.claim("ep:\(episode.vid)") { [weak p] in p?.pause() }
             p.play()
             if speed != 1.0 { p.rate = speed }
             paused = false

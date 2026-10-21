@@ -547,6 +547,8 @@ private struct FeedCard: View {
         let p = AVPlayer(url: url)
         p.isMuted = muted
         player = p
+        // 申请全局播放权：会把上一个还在播的画面停掉
+        PlaybackCenter.shared.claim("feed:\(item.id)") { [weak p] in p?.pause() }
         // 一集播完回到开头重播，画面一直在动
         ended = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime, object: p.currentItem, queue: .main) { _ in
@@ -557,6 +559,7 @@ private struct FeedCard: View {
 
     private func teardown() {
         player?.pause()
+        PlaybackCenter.shared.release("feed:\(item.id)")
         if let e = ended { NotificationCenter.default.removeObserver(e); ended = nil }
         player = nil
     }
@@ -646,7 +649,11 @@ struct FeedView: View {
         ScrollView(.vertical) {
             LazyVStack(spacing: 0) {
                 ForEach(Array(model.items.enumerated()), id: \.element.id) { i, it in
-                    FeedCard(item: it, isActive: i == index && active,
+                    // 弹出播放页 / 详情页时底下的卡片必须停：
+                    // fullScreenCover 和 sheet 都不会让下面这层 onDisappear，
+                    // 它照播不误 —— 于是和播放页两个声音叠在一起。
+                    FeedCard(item: it,
+                             isActive: i == index && active && play == nil && open == nil,
                              onPlay: { startPlay(i) },
                              onDetail: { open = it })
                         .containerRelativeFrame([.horizontal, .vertical])
