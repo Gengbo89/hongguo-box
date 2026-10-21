@@ -33,17 +33,20 @@ jobs:
           if [ $code -ne 0 ]; then
             {
               echo "=== 构建失败 exit=$code ==="
+              echo "--- 前 120 行 ---"
+              head -120 /tmp/build.log
               echo "--- 最后 400 行 ---"
               tail -400 /tmp/build.log
-              echo "--- error 行 ---"
-              grep -nE "error:|fatal error|The following build commands failed|undefined symbol|cannot find|No such file" /tmp/build.log | head -80
+              echo "--- error/fatal 行 ---"
+              grep -nE "error:|fatal error|The following build commands failed|undefined symbol|cannot find|No such file|Command .* failed" /tmp/build.log | head -120
             } > build-error.log
             git config user.email "ci@users.noreply.github.com"
             git config user.name "ci"
+            # 单独推一个分支：主分支上有并发的清单提交，直接 push 会被拒
+            git checkout -B ci-log
             git add -f build-error.log
-            git commit -q -m "ci: build error log [skip ci]" || true
-            git pull --rebase -q origin main || true
-            git push || true
+            git commit -q -m "ci: build error log run ${GITHUB_RUN_NUMBER} [skip ci]" || true
+            git push -f origin ci-log || echo "日志推送失败"
           fi
           exit $code
 

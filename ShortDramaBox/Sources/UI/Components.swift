@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 /// 观看进度 / 历史（本地持久化）
@@ -76,23 +77,39 @@ struct PosterCard: View {
 /// 弹出播放页之后两个 AVPlayer 一起响，就是「两个视频同时播放、声音重叠」。
 /// 视图层已经按「有没有弹层」把底色停掉，这里再加一道硬保证：
 /// 谁最后申请播放权，谁就把上一个持有者停掉。
-@MainActor
-final class PlaybackCenter {
+///
+/// 注意不要标 @MainActor：调用点在 View 的普通方法里，
+/// iOS 上那是同步的非隔离上下文，标了隔离直接编译不过
+/// （error: call to main actor-isolated instance method in a
+///  synchronous nonisolated context）。改用锁保护，
+/// 并把「停上一个」确保派回主线程执行。
+final class PlaybackCenter: @unchecked Sendable {
     static let shared = PlaybackCenter()
+    private let lock = NSLock()
     private var owner: String?
     private var stop: (() -> Void)?
 
     /// 申请播放权。上一个持有者会被立刻停掉。
     func claim(_ id: String, stop: @escaping () -> Void) {
-        if owner != id { self.stop?() }
+        lock.lock()
+        // 自己重复申请就别把自己停了
+        let prev: (() -> Void)? = (owner == id) ? nil : self.stop
         owner = id
         self.stop = stop
+        lock.unlock()
+        if let prev { onMain(prev) }
     }
 
     /// 归还。只有自己还持有时才清空，免得把后来者的播放权一起抹掉。
     func release(_ id: String) {
-        guard owner == id else { return }
-        owner = nil
-        self.stop = nil
+        lock.lock()
+        if owner == id { owner = nil; stop = nil }
+        lock.unlock()
+    }
+
+    /// 停播放器得在主线程做。本来就在主线程就直接同步执行，
+    /// 这样「先停上一个、再播下一个」的顺序是确定的。
+    private func onMain(_ f: @escaping () -> Void) {
+        if Thread.isMainThread { f() } else { DispatchQueue.main.async(execute: f) }
     }
 }
