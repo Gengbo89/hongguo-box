@@ -1,6 +1,9 @@
 import SwiftUI
 import AVKit
 import Combine
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // MARK: - 单条推荐
 
