@@ -14,11 +14,8 @@ enum AppVersion {
     static var build: String {
         (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "1"
     }
-    /// "1.0.10（构建 10）"
-    static var display: String { "\(short)（构建 \(build)）" }
-
-    /// 构建号转 Int，用于比较新旧
-    static var buildNumber: Int { Int(build) ?? 0 }
+    /// 展示用："1.0.3"
+    static var display: String { short }
 }
 
 /// 更新检查结果
@@ -26,7 +23,7 @@ enum UpdateState: Equatable {
     case idle
     case checking
     case latest                       // 已是最新
-    case newer(String)                // 有新版本（标签，如 build-16）
+    case newer(String)                // 有新版本（版本号，如 1.0.3）
     case failed(String)
 }
 
@@ -53,9 +50,9 @@ final class UpdateChecker: ObservableObject {
             guard let tag = Self.latestTag(in: xml) else {
                 state = .failed("没能解析版本信息"); return
             }
-            let n = Int(tag.replacingOccurrences(of: "build-", with: "")) ?? 0
-            if n > AppVersion.buildNumber {
-                state = .newer(tag)
+            // 比版本号本身（远端 tag 形如 v1.0.3，本机是 1.0.3）
+            if Self.isNewer(tag, than: AppVersion.short) {
+                state = .newer(tag.hasPrefix("v") ? String(tag.dropFirst()) : tag)
             } else {
                 state = .latest
             }
@@ -64,27 +61,41 @@ final class UpdateChecker: ObservableObject {
         }
     }
 
-    /// 从 atom feed 里取第一个 <id>…/releases/tag/build-N</id>
+    /// 从 atom feed 里取第一个版本号：<id>…/releases/tag/v1.0.3</id>
+    /// 标题（「短剧盒子 iOS 测试版 1.0.3」）作为兜底。
     static func latestTag(in xml: String) -> String? {
-        // 优先看 <entry> 内的 tag 链接
         let patterns = [
-            #"/releases/tag/(build-[0-9]+)"#,
-            #"<title>([^<]*build-[0-9]+[^<]*)</title>"#,
+            #"/releases/tag/(v?[0-9]+\.[0-9]+\.[0-9]+)"#,
+            #"<title>[^<]*?(v?[0-9]+\.[0-9]+\.[0-9]+)[^<]*</title>"#,
         ]
         for p in patterns {
             if let re = try? NSRegularExpression(pattern: p),
                let m = re.firstMatch(in: xml, range: NSRange(xml.startIndex..., in: xml)),
                m.numberOfRanges > 1,
                let r = Range(m.range(at: 1), in: xml) {
-                let s = String(xml[r])
-                if let re2 = try? NSRegularExpression(pattern: #"build-[0-9]+"#),
-                   let m2 = re2.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
-                   let r2 = Range(m2.range, in: s) {
-                    return String(s[r2])
-                }
+                return String(xml[r])
             }
         }
         return nil
+    }
+
+    /// "1.0.3" / "v1.0.3" → [1, 0, 3]
+    static func versionParts(_ s: String) -> [Int] {
+        var t = s
+        if t.hasPrefix("v") { t.removeFirst() }
+        return t.split(separator: ".").map { Int($0.filter(\.isNumber)) ?? 0 }
+    }
+
+    /// 远端 tag 是否比本机版本新
+    static func isNewer(_ tag: String, than current: String) -> Bool {
+        let a = versionParts(tag)
+        let b = versionParts(current)
+        for i in 0..<max(a.count, b.count) {
+            let x = i < a.count ? a[i] : 0
+            let y = i < b.count ? b[i] : 0
+            if x != y { return x > y }
+        }
+        return false
     }
 }
 

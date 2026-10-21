@@ -179,8 +179,17 @@ struct BrowseView: View {
     @State private var building = true
     @State private var showAll = false
 
-    /// 顶部胶囊里先放最热的一批，剩下的进「全部标签」
-    private var hot: [LocalIndex.TagBucket] { Array(buckets.prefix(20)) }
+    /// 顶部只展示最热的一批，其余标签进「查看更多」
+    private static let hotCount = 16
+    private var hot: [LocalIndex.TagBucket] { Array(buckets.prefix(Self.hotCount)) }
+
+    /// 选中的标签若不在热门里（从「查看更多」挑的），也插到最前面显示，
+    /// 否则顶部会看不出当前选的是哪个。
+    private var shown: [LocalIndex.TagBucket] {
+        guard let t = tag, !hot.contains(where: { $0.tag == t }),
+              let b = buckets.first(where: { $0.tag == t }) else { return hot }
+        return [b] + hot
+    }
 
     var body: some View {
         NavigationStack {
@@ -192,6 +201,7 @@ struct BrowseView: View {
                                        desc: "内置索引里没有读到标签")
                 } else {
                     VStack(spacing: 0) {
+                        tagHeader
                         chips
                         Divider()
                         if let t = tag {
@@ -204,14 +214,6 @@ struct BrowseView: View {
                 }
             }
             .navigationTitle("分类")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showAll = true } label: {
-                        Label("全部标签", systemImage: "tag")
-                    }
-                    .disabled(buckets.isEmpty)
-                }
-            }
             .sheet(isPresented: $showAll) {
                 AllTagsView(buckets: buckets, selected: $tag, dismissTo: $showAll)
             }
@@ -227,33 +229,49 @@ struct BrowseView: View {
         }
     }
 
-    private var chips: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(hot, id: \.tag) { b in
-                    Button { tag = b.tag } label: {
-                        Text(b.tag)
-                            .font(.system(size: 13, weight: tag == b.tag ? .semibold : .regular))
-                            .padding(.horizontal, 12).padding(.vertical, 6)
-                            .background(tag == b.tag ? Color.pink.opacity(0.85)
-                                                     : Color.white.opacity(0.12))
-                            .foregroundStyle(.white)
-                            .clipShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
+    /// 「热门标签」标题行 + 「查看更多」入口
+    private var tagHeader: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text("热门标签").font(.headline)
+            Spacer()
+            Button { showAll = true } label: {
+                HStack(spacing: 2) {
+                    Text("查看更多（\(buckets.count)）")
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
                 }
-                Button { showAll = true } label: {
-                    Text("更多 ›")
-                        .font(.system(size: 13, weight: .semibold))
-                        .padding(.horizontal, 12).padding(.vertical, 6)
-                        .background(Color.white.opacity(0.12))
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
+    }
+
+    /// 热门标签整块换行铺开（不做横向滚动），一眼能看全
+    private var chips: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 80), spacing: 8)],
+                  alignment: .leading, spacing: 8) {
+            ForEach(shown, id: \.tag) { b in
+                Button { tag = b.tag } label: {
+                    Text(b.tag)
+                        .font(.system(size: 13, weight: tag == b.tag ? .semibold : .regular))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 7)
+                        .background(tag == b.tag ? Color.pink.opacity(0.85)
+                                                 : Color.white.opacity(0.12))
                         .foregroundStyle(.white)
                         .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
             }
-            .padding(.horizontal, 12).padding(.vertical, 10)
         }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 10)
     }
 }
 
@@ -319,6 +337,8 @@ private struct TagResultGrid: View {
                     Text("「\(tag)」共 \(total) 部")
                         .font(.footnote).foregroundStyle(.secondary)
                     Spacer()
+                    Text("按最新排序")
+                        .font(.footnote).foregroundStyle(.secondary)
                 }
                 .padding(.horizontal).padding(.top, 10)
             }

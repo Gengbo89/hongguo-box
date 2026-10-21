@@ -16,6 +16,7 @@ import Compression
 ///   eps          u16 × count
 ///   tagCounts    u8  × count
 ///   tagRefs      u16 × total
+///   created      u32 × count（版本 2 起：上架时间，Unix 秒）
 ///
 /// 刻意不把 58.8 万条解析成 Swift 对象（那要几百 MB 内存），
 /// 而是保留一整块 Data，搜索时在片名 blob 上做字节扫描，
@@ -38,6 +39,8 @@ final class LocalIndex {
     private var epsOff = 0
     private var tagCountsOff = 0
     private var tagRefsOff = 0
+    /// 版本 2 起正文末尾 created(u32×count) 的起始偏移；旧格式为 -1。
+    private var createdOff = -1
     /// 每条记录在 tagRefs 里的起始下标（前缀和）。
     /// 标签引用是变长的，不预计算的话每次取标签都要从第 0 条累加到目标下标。
     private var tagPrefix: [Int32] = []
@@ -46,6 +49,9 @@ final class LocalIndex {
     /// 标签 → 记录下标的倒排索引。首次用到才建（约 0.3~1 秒、约 7 MB），
     /// 之后按标签翻库就是直接切片，不再全表扫描。
     private var tagIndex: [[Int32]]?
+
+    /// 「最新在前」的记录下标顺序，建倒排时用；也只算一次。
+    private var orderCache: [Int32]?
 
     private var loadFailed = false
     private var loaded = false
@@ -94,12 +100,14 @@ final class LocalIndex {
         }
         guard decoded == Int(rawSize), out.count > 16, out.prefix(4) == Data("DJIX".utf8) else { return }
 
-        let hdr = out.withUnsafeBytes { p -> (UInt32, UInt32) in
-            (p.loadUnaligned(fromByteOffset: 8, as: UInt32.self),
+        let hdr = out.withUnsafeBytes { p -> (UInt32, UInt32, UInt32) in
+            (p.loadUnaligned(fromByteOffset: 4, as: UInt32.self),
+             p.loadUnaligned(fromByteOffset: 8, as: UInt32.self),
              p.loadUnaligned(fromByteOffset: 12, as: UInt32.self))
         }
-        let n = Int(hdr.0)
-        let tagCount = Int(hdr.1)
+        let ver = hdr.0
+        let n = Int(hdr.1)
+        let tagCount = Int(hdr.2)
         guard n > 0, tagCount >= 0, tagCount < 100_000 else { return }
 
         var tags: [String] = []
@@ -143,6 +151,14 @@ final class LocalIndex {
             pref[n] = acc
         }
         tagPrefix = pref
+
+        // 版本 2 起：正文在 tagRefs 之后追加 created(u32 × count)
+        createdOff = -1
+        if ver >= 2 {
+            let after = tagRefsOff + Int(pref[n]) * 2
+            if after + n * 4 <= out.count { createdOff = after }
+        }
+        orderCache = nil
 
         tagTable = tags
         count = n
@@ -218,19 +234,56 @@ final class LocalIndex {
         var count: Int
     }
 
+    /// 记录的「最新在前」顺序：created 倒序，同一秒内按下标（≈id）倒序。
+    private func timeDescOrder() -> [Int32] {
+        if let o = orderCache { return o }
+        var o: [Int32] = []
+        if createdOff >= 0, let d = data, count > 0 {
+            // 打包成一个 UInt64 排序（高 32 位 created、低 32 位下标），
+            // 比带闭包的比较器快得多。
+            var keys = [UInt64](repeating: 0, count: count)
+            d.withUnsafeBytes { p in
+                for i in 0..<count {
+                    let c = UInt64(p.loadUnaligned(fromByteOffset: createdOff + i * 4, as: UInt32.self))
+                    keys[i] = (c << 32) | UInt64(i)
+                }
+            }
+            keys.sort(by: >)
+            o = keys.map { Int32(truncatingIfNeeded: $0) }
+        } else {
+            // 旧格式没有时间字段：id 升序≈时间升序，倒着来最接近「最新在前」
+            o = (0..<max(count, 0)).reversed().map { Int32($0) }
+        }
+        orderCache = o
+        return o
+    }
+
+    /// 该记录的上架时间（Unix 秒）。格式版本 2 起才有；没有则返回 0。
+    func created(at index: Int) -> UInt32 {
+        load()
+        guard let d = data, createdOff >= 0, index >= 0, index < count,
+              createdOff + (index + 1) * 4 <= d.count else { return 0 }
+        return d.withUnsafeBytes {
+            $0.loadUnaligned(fromByteOffset: createdOff + index * 4, as: UInt32.self)
+        }
+    }
+
     /// 建倒排索引。两趟扫描：先数个数把容量开好（避免反复扩容），再灌。
-    /// 记录下标递增地扫，所以每个标签的列表天然升序。
+    /// 按「最新在前」的顺序扫，所以每个标签的列表天然就是时间倒序，
+    /// 分类页翻页时直接切片即可，不需要在查询时再排序。
     private func buildTagIndex() -> [[Int32]] {
         load()
         lock.lock()
         defer { lock.unlock() }
         if let t = tagIndex { return t }
+        let ord = timeDescOrder()
         var lists: [[Int32]] = []
         if let d = data, count > 0, !tagTable.isEmpty, tagPrefix.count > count {
             lists = [[Int32]](repeating: [], count: tagTable.count)
             var counts = [Int32](repeating: 0, count: tagTable.count)
             d.withUnsafeBytes { raw in
-                for i in 0..<count {
+                for oi in ord {
+                    let i = Int(oi)
                     let n = Int(raw.loadUnaligned(fromByteOffset: tagCountsOff + i, as: UInt8.self))
                     guard n > 0 else { continue }
                     let base = Int(tagPrefix[i])
@@ -244,7 +297,8 @@ final class LocalIndex {
             }
             for i in 0..<lists.count { lists[i].reserveCapacity(Int(counts[i])) }
             d.withUnsafeBytes { raw in
-                for i in 0..<count {
+                for oi in ord {
+                    let i = Int(oi)
                     let n = Int(raw.loadUnaligned(fromByteOffset: tagCountsOff + i, as: UInt8.self))
                     guard n > 0 else { continue }
                     let base = Int(tagPrefix[i])

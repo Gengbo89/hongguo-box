@@ -114,4 +114,56 @@ final class IndexTests: XCTestCase {
         let dt = Date().timeIntervalSince(t0)
         XCTAssertLessThan(dt, 2.0, "20 次翻页用了 \(String(format: "%.3f", dt)) 秒")
     }
+
+    /// 分类页的核心诉求：标签下的内容必须是时间倒序（最新在前）
+    func testTagListingIsNewestFirst() {
+        var checked = 0
+        var bad: [String] = []
+        for b in LocalIndex.shared.tagBuckets().prefix(3) {
+            let items = LocalIndex.shared.series(tag: b.tag, offset: 0, limit: 120).items
+            guard items.count > 10 else { continue }
+            var prev = UInt32.max
+            for s in items {
+                guard let idx = recordIndex(of: s.id) else { continue }
+                let c = LocalIndex.shared.created(at: idx)
+                if c > prev { bad.append("\(b.tag):\(c)>\(prev)") }
+                prev = c
+                checked += 1
+            }
+        }
+        XCTAssertGreaterThan(checked, 100, "实际只检查了 \(checked) 条")
+        XCTAssertTrue(bad.isEmpty, "出现时间逆序：\(bad.prefix(5))")
+    }
+
+    /// 倒序的「第一条」必须是新剧。顺序反了或没有时间字段时，
+    /// 头一条会是 2023 年的老剧，这条断言就会挂。
+    func testTagListingStartsFromRecent() {
+        guard let top = LocalIndex.shared.tagBuckets().first else { return XCTFail("没有标签") }
+        let one = LocalIndex.shared.series(tag: top.tag, offset: 0, limit: 1).items
+        guard let s = one.first, let idx = recordIndex(of: s.id) else { return XCTFail("取不到第一条") }
+        let c = LocalIndex.shared.created(at: idx)
+        let limit = UInt32(Date().timeIntervalSince1970) - 400 * 86400
+        XCTAssertGreaterThan(c, limit, "「\(top.tag)」第一条是 \(c)，不像最新上架的")
+    }
+
+    /// 索引里必须真的带 created，否则「按时间排序」无从谈起
+    func testCreatedFieldIsPresent() {
+        let n = min(LocalIndex.shared.totalCount, 5000)
+        var zero = 0
+        for i in 0..<n where LocalIndex.shared.created(at: i) == 0 { zero += 1 }
+        XCTAssertEqual(zero, 0, "前 \(n) 条里有 \(zero) 条没有时间")
+    }
+
+    /// id 二分定位（索引里 ids 升序，测试里只好自己找）
+    private func recordIndex(of id: String) -> Int? {
+        var lo = 0
+        var hi = LocalIndex.shared.totalCount - 1
+        while lo <= hi {
+            let mid = (lo + hi) / 2
+            guard let s = LocalIndex.shared.series(at: mid) else { return nil }
+            if s.id == id { return mid }
+            if s.id < id { lo = mid + 1 } else { hi = mid - 1 }
+        }
+        return nil
+    }
 }

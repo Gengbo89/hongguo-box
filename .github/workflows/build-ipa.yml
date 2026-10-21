@@ -24,6 +24,23 @@ jobs:
       - name: 安装 xcodegen
         run: brew install xcodegen
 
+      # 版本号规则：v1.0.N，N 从 0 开始，每发布一次 +1。
+      # 历史的 build-* 不算数，所以第一次跑这条规则会得到 1.0.0。
+      # checkout 是浅克隆、本地没有 tag，用 ls-remote 直接问远端。
+      - name: 计算版本号
+        id: ver
+        run: |
+          MAX=$(git ls-remote --tags origin 2>/dev/null \
+                | awk '{print $2}' | sed 's#refs/tags/##' | grep -v '\^{}' \
+                | grep -E '^v1\.0\.[0-9]+$' | sed 's#^v1\.0\.##' \
+                | sort -n | tail -1)
+          MAX=${MAX:--1}
+          NEXT=$((MAX + 1))
+          echo "version=1.0.$NEXT" >> "$GITHUB_OUTPUT"
+          echo "tag=v1.0.$NEXT" >> "$GITHUB_OUTPUT"
+          echo "patch=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "本次版本 1.0.$NEXT（tag v1.0.$NEXT）；远端已有的最大 patch=$MAX"
+
       # 单元测试真跑在 iOS 模拟器里（runner 自带 Xcode + 模拟器运行时）。
       # 失败就 exit 非 0：后面出包/发 Release 都带 if: success()，
       # 于是「测试不过就不发版」，不再把 bug 丢给用户去发现。
@@ -87,6 +104,7 @@ jobs:
       - name: 打包未签名 IPA
         run: |
           set +e
+          MARKETING_VERSION="${{ steps.ver.outputs.version }}" \
           BUILD_NUMBER="${{ github.run_number }}" ./ShortDramaBox/make-ipa.sh ShortDramaBox-unsigned.ipa > /tmp/build.log 2>&1
           code=$?
           echo "exit=$code"
@@ -159,14 +177,43 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="build-${GITHUB_RUN_NUMBER}"
+          TAG="${{ steps.ver.outputs.tag }}"
+          VER="${{ steps.ver.outputs.version }}"
           NOTES="未签名 IPA，用 Sideloadly + 免费 Apple ID 安装。
-          
+
           安装：下载下面的 ShortDramaBox-unsigned.ipa，拖进 Sideloadly，填入 Apple ID，Start。
           装完在 iPhone 的「设置 → 通用 → VPN 与设备管理」里信任证书。
           免费账号签名 7 天过期，重跑一次 Sideloadly 续期即可，数据不丢。"
           gh release create "$TAG" ShortDramaBox-unsigned.ipa \
-            --title "短剧盒子 iOS 测试版 build ${GITHUB_RUN_NUMBER}" \
+            --title "短剧盒子 iOS 测试版 $VER（build ${GITHUB_RUN_NUMBER}）" \
             --notes "$NOTES" \
             --latest || echo "发布失败（可能已存在）"
-          gh release list | head -3
+
+          # 万一没发成功就直接退出：否则下面的清理会把历史版本全删了、却什么都没留下
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "发布没成功，跳过清理（不动历史版本）"
+            exit 1
+          fi
+
+          # 只保留最新这一个：历史 release（连同 tag）全部删掉
+          echo "==> 清理历史 release/tag，只留 $TAG"
+          gh release list --limit 200 --json tagName --jq '.[].tagName' 2>/dev/null | while read -r t; do
+            [ -z "$t" ] && continue
+            [ "$t" = "$TAG" ] && continue
+            echo "  删 release $t"
+            gh release delete "$t" --cleanup-tag --yes || true
+          done
+
+          # 兜底：删掉没有 release 的残留 tag（含历史的 build-*）
+          git ls-remote --tags origin 2>/dev/null | awk '{print $2}' | sed 's#refs/tags/##' \
+            | grep -v '\^{}' | while read -r t; do
+            [ -z "$t" ] && continue
+            [ "$t" = "$TAG" ] && continue
+            echo "  删 tag $t"
+            git push origin --delete "$t" || true
+          done
+
+          echo "==> 保留下来的 release："
+          gh release list --limit 10
+          echo "==> 保留下来的 tag："
+          git ls-remote --tags origin | awk '{print $2}' | sed 's#refs/tags/##' | grep -v '\^{}' | sort
