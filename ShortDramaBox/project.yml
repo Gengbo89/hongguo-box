@@ -44,14 +44,38 @@ targets:
         CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
+        # @testable import 要求被测模块开了可测试性。
+        # 只给 Debug：Release 出的那个 IPA 不背这个包袱（体积/符号都会变）。
+        Debug:
+          ENABLE_TESTABILITY: YES
+# 单元测试：跑在 iOS 模拟器里（CI 的 macOS runner 有 Xcode + 模拟器）。
+  # 用 TEST_HOST 挂到 App 上，这样 Bundle.main 就是 App 包，
+  # LocalIndex 能读到真正的 index.bin.z，测的就是真机上那份资源。
+  ShortDramaBoxTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: ShortDramaBox
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.duanju.box.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ShortDramaBox.app/ShortDramaBox"
+        BUNDLE_LOADER: "$(TEST_HOST)"
 schemes:
   ShortDramaBox:
     build:
       targets:
         ShortDramaBox: all
+        ShortDramaBoxTests: [test]
     run:
       config: Debug
     test:
       config: Debug
+      targets:
+        - ShortDramaBoxTests
     archive:
       config: Release

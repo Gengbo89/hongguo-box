@@ -220,7 +220,8 @@ private final class BoostBox {
 /// 不抢分页滚动：cancelsTouchesInView = false 且允许与其它手势同时识别；
 /// 手指在 0.25 秒内移动超过 30 点时长按直接失败，翻页照常。
 struct PlayerGestureLayer: UIViewRepresentable {
-    var onTap: () -> Void
+    /// 参数 = 这一下是不是点在视频下方（下三分之一）
+    var onTap: (Bool) -> Void
     var onHoldStart: () -> Void
     var onHoldEnd: () -> Void
 
@@ -266,8 +267,10 @@ struct PlayerGestureLayer: UIViewRepresentable {
         }
 
         @objc func tap(_ g: UITapGestureRecognizer) {
-            guard g.state == .ended else { return }
-            parent.onTap()
+            guard g.state == .ended, let v = g.view else { return }
+            // 下三分之一算「视频下方区域」：那里点一下是露出进度条，不是暂停
+            let bottom = g.location(in: v).y > v.bounds.height * 0.7
+            parent.onTap(bottom)
         }
 
         func gestureRecognizer(_ g: UIGestureRecognizer,
@@ -279,7 +282,7 @@ struct PlayerGestureLayer: UIViewRepresentable {
 #else
 /// 本机（macOS）typecheck 用的空壳；真机走上面的 UIKit 版本。
 struct PlayerGestureLayer: View {
-    var onTap: () -> Void
+    var onTap: (Bool) -> Void
     var onHoldStart: () -> Void
     var onHoldEnd: () -> Void
     var body: some View { Color.clear }
@@ -310,10 +313,12 @@ private struct EpisodePage: View {
     @State private var duration: Double = 0
     /// 正在拖进度条
     @State private var scrubbing = false
-    /// 拖进度条时滑块的落点
-    @State private var scrubTarget: Double = 0
     /// 开始拖动前是不是在播，松手后要接着播
     @State private var wasPlaying = false
+    /// 进度条是否露出（默认藏着，点视频下方才出来）
+    @State private var showBar = false
+    /// 露出 3 秒后自动收起
+    @State private var hideTask: Task<Void, Never>?
     @State private var endObs: NSObjectProtocol?
     @State private var started = false
     @State private var failed = false
@@ -329,7 +334,7 @@ private struct EpisodePage: View {
     @State private var boost = BoostBox()
 
     /// 长按快进的倍速
-    private static let boostRate: Float = 1.5
+    private static let boostRate: Float = 2.0
 
     /// 盯 AVPlayerItem 的失败（解码器报错 / 播到一半中断）
     @State private var itemObs: NSKeyValueObservation?
@@ -361,7 +366,9 @@ private struct EpisodePage: View {
                 // 后者套在分页 ScrollView 里容易和翻页抢手势，
                 // maximumDistance 让手指挪超过 30 点就直接交给翻页。
                 PlayerGestureLayer(
-                    onTap: { togglePlay() },
+                    onTap: { bottom in
+                        if bottom { toggleBar() } else { togglePlay() }
+                    },
                     onHoldStart: { beginBoost() },
                     onHoldEnd: { endBoost() }
                 )
@@ -392,33 +399,37 @@ private struct EpisodePage: View {
                 .allowsHitTesting(false)
                 .opacity(boosting ? 1 : 0)
 
-                // 进度条：单集内可以随便拖。想看最后几秒直接拖过去，
-                // 不用从头等到尾。拖动时先暂停，松手再定位并接着播。
+                // 进度条：默认藏着（不挡画面），点视频下方才露出，3 秒后自动收起。
+                // 不给它上 if：视图树保持恒定，只改透明度和是否可点。
                 VStack {
                     Spacer()
                     HStack(spacing: 10) {
-                        Text(Self.clock(scrubbing ? scrubTarget : position))
+                        Text(Self.clock(position))
                             .font(.system(size: 11, weight: .medium).monospacedDigit())
                             .foregroundStyle(.white)
                             .frame(width: 46, alignment: .trailing)
-                        Slider(value: $scrubTarget, in: 0...max(duration, 1)) { editing in
-                            if editing {
-                                scrubbing = true
-                                wasPlaying = (player?.rate ?? 0) > 0
-                                player?.pause()
-                            } else {
-                                let t = CMTime(seconds: scrubTarget, preferredTimescale: 600)
-                                player?.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
-                                position = scrubTarget
-                                scrubbing = false
-                                if wasPlaying {
-                                    player?.play()
-                                    player?.rate = boosting ? Self.boostRate : speed
+                        ScrubBar(
+                            position: position,
+                            duration: duration,
+                            onEditing: { editing in
+                                if editing {
+                                    scrubbing = true
+                                    wasPlaying = (player?.rate ?? 0) > 0
+                                    player?.pause()
+                                    hideTask?.cancel()
+                                } else {
+                                    let t = CMTime(seconds: position, preferredTimescale: 600)
+                                    player?.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
+                                    scrubbing = false
+                                    if wasPlaying {
+                                        player?.play()
+                                        player?.rate = boosting ? Self.boostRate : speed
+                                    }
+                                    // 拖完再给 3 秒
+                                    armHide()
                                 }
-                            }
-                        }
-                        .tint(.pink)
-                        .disabled(duration <= 0)
+                            },
+                            onSeek: { sec in position = sec })
                         Text(Self.clock(duration))
                             .font(.system(size: 11, weight: .medium).monospacedDigit())
                             .foregroundStyle(.white.opacity(0.8))
@@ -426,7 +437,15 @@ private struct EpisodePage: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.bottom, 8)
+                    .padding(.top, 8)
+                    .background(
+                        LinearGradient(colors: [.black.opacity(0), .black.opacity(0.55)],
+                                       startPoint: .top, endPoint: .bottom)
+                    )
                 }
+                .opacity(showBar ? 1 : 0)
+                .allowsHitTesting(showBar)
+                .animation(.easeOut(duration: 0.22), value: showBar)
             } else {
                 VStack(spacing: 14) {
                     if failed {
@@ -580,7 +599,79 @@ private struct EpisodePage: View {
         player?.rate = boost.base
     }
 
-    /// 秒 → mm:ss（超过一小时用 h:mm:ss）
+    /// 点视频下方：露出进度条；再点一下收起
+    private func toggleBar() {
+        if showBar {
+            hideTask?.cancel(); hideTask = nil
+            withAnimation(.easeOut(duration: 0.22)) { showBar = false }
+        } else {
+            withAnimation(.easeOut(duration: 0.22)) { showBar = true }
+            armHide()
+        }
+    }
+
+    /// 3 秒后自动收起（拖动中不收起）
+    private func armHide() {
+        hideTask?.cancel()
+        hideTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled, !scrubbing else { return }
+            withAnimation(.easeOut(duration: 0.22)) { showBar = false }
+        }
+    }
+
+    /// 自绘进度条。
+///
+/// 不用 SwiftUI 的 Slider：iOS 上不给改 thumb 尺寸，那个圆点太大。
+/// 自己画一个：3pt 轨道 + 9pt 圆点，点一下定位、按住拖也能定位。
+private struct ScrubBar: View {
+    let position: Double
+    let duration: Double
+    /// 开始/结束拖动
+    let onEditing: (Bool) -> Void
+    /// 拖到某个位置（秒）
+    let onSeek: (Double) -> Void
+
+    @State private var dragging = false
+
+    private let knob: CGFloat = 9
+    private let track: CGFloat = 3
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = max(geo.size.width, 1)
+            let frac = duration > 0 ? min(max(position / duration, 0), 1) : 0
+            ZStack(alignment: .leading) {
+                Capsule().fill(.white.opacity(0.28))
+                    .frame(height: track)
+                Capsule().fill(.pink)
+                    .frame(width: w * frac, height: track)
+                Circle().fill(.white)
+                    .frame(width: knob, height: knob)
+                    .shadow(color: .black.opacity(0.5), radius: 2, y: 1)
+                    .offset(x: min(max(w * frac - knob / 2, 0), w - knob))
+            }
+            .frame(maxHeight: .infinity)
+            // 触摸区拉高一点，好拖（视觉上还是细的）
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { v in
+                        if !dragging { dragging = true; onEditing(true) }
+                        onSeek(min(max(v.location.x / w, 0), 1) * duration)
+                    }
+                    .onEnded { v in
+                        onSeek(min(max(v.location.x / w, 0), 1) * duration)
+                        dragging = false
+                        onEditing(false)
+                    }
+            )
+        }
+        .frame(height: 22)
+    }
+}
+
+/// 秒 → mm:ss（超过一小时用 h:mm:ss）
     private static func clock(_ s: Double) -> String {
         guard s.isFinite, s >= 0 else { return "00:00" }
         let t = Int(s.rounded())
@@ -604,6 +695,7 @@ private struct EpisodePage: View {
         stopWatching()
         endBoost()
         boosting = false; paused = false
+        hideTask?.cancel(); hideTask = nil
         if let o = timeObs { player?.removeTimeObserver(o); timeObs = nil }
         if let o = scrubObs { player?.removeTimeObserver(o); scrubObs = nil }
         if let o = endObs { NotificationCenter.default.removeObserver(o); endObs = nil }
@@ -639,7 +731,8 @@ private struct EpisodePage: View {
         autoRetried = false
         failed = false
         ready = false; progress = 0; status = "获取播放地址…"
-        duration = 0; position = 0; scrubTarget = 0; scrubbing = false
+        duration = 0; position = 0; scrubbing = false
+        showBar = false; hideTask?.cancel(); hideTask = nil
         if let o = timeObs { player?.removeTimeObserver(o); timeObs = nil }
         if let o = scrubObs { player?.removeTimeObserver(o); scrubObs = nil }
         player?.pause(); player = nil
@@ -712,10 +805,7 @@ private struct EpisodePage: View {
                 let d = p.currentItem?.duration.seconds ?? 0
                 Task { @MainActor in
                     if d.isFinite, d > 0 { duration = d }
-                    if !scrubbing, sec.isFinite {
-                        position = sec
-                        scrubTarget = sec
-                    }
+                    if !scrubbing, sec.isFinite { position = sec }
                 }
             }
 

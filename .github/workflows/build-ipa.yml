@@ -24,6 +24,56 @@ jobs:
       - name: 安装 xcodegen
         run: brew install xcodegen
 
+      # 单元测试真跑在 iOS 模拟器里（runner 自带 Xcode + 模拟器运行时）。
+      # 失败就 exit 非 0：后面出包/发 Release 都带 if: success()，
+      # 于是「测试不过就不发版」，不再把 bug 丢给用户去发现。
+      - name: 单元测试（iOS 模拟器）
+        run: |
+          set +e
+          cd ShortDramaBox
+          xcodegen generate > /tmp/test.log 2>&1
+          # 用 UDID 选设备最稳：各 runner 上机型名字不完全一样
+          UDID=$(xcrun simctl list devices available \
+            | grep -E '^[[:space:]]+iPhone' \
+            | grep -oE '\([0-9A-F]{8}-[0-9A-F-]{27}\)' | head -1 | tr -d '()')
+          echo "模拟器 UDID=[$UDID]"
+          xcrun simctl list devices available | head -40 >> /tmp/test.log 2>&1
+          if [ -z "$UDID" ]; then
+            echo "找不到可用的 iPhone 模拟器" >> /tmp/test.log
+            code=99
+          else
+            xcodebuild test \
+              -project ShortDramaBox.xcodeproj \
+              -scheme ShortDramaBox \
+              -destination "id=$UDID" \
+              -derivedDataPath /tmp/dd-test \
+              -parallel-testing-enabled NO \
+              CODE_SIGNING_ALLOWED=NO >> /tmp/test.log 2>&1
+            code=$?
+          fi
+          echo "===== 测试 exit=$code ====="
+          grep -E "Test Suite .* (passed|failed)|Test Case .* (passed|failed)|Executed [0-9]+ test|error:|XCTAssert" /tmp/test.log | tail -40
+
+          # Actions 的日志抓不下来（API 403），报告推到分支上留档
+          {
+            echo "=== 单元测试报告  run ${GITHUB_RUN_NUMBER}  exit=$code ==="
+            echo "commit: ${GITHUB_SHA}   模拟器: ${UDID:-无}"
+            echo "--- 结果 ---"
+            grep -E "Test Suite .* (passed|failed)|Test Case .* (passed|failed)|Executed [0-9]+ test|error:|XCTAssert|Testing failed" /tmp/test.log | tail -300
+            if [ $code -ne 0 ]; then
+              echo "--- 最后 250 行 ---"
+              tail -250 /tmp/test.log
+            fi
+          } > test-report.log
+          wc -l test-report.log
+          git config user.email "ci@users.noreply.github.com"
+          git config user.name "ci"
+          git checkout -B ci-test-log
+          git add -f test-report.log
+          git commit -q -m "ci: 测试报告 run ${GITHUB_RUN_NUMBER} [skip ci]" || true
+          git push -f origin ci-test-log || echo "报告推送失败"
+          exit $code
+
       - name: 打包未签名 IPA
         run: |
           set +e
