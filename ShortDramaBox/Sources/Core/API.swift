@@ -123,7 +123,7 @@ enum Catalog {
 
     // MARK: - 搜索索引磁盘缓存
 
-    private static var indexCacheURL: URL {
+    static var indexCacheURL: URL {
         let d = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         return d.appendingPathComponent("search-index.json")
     }

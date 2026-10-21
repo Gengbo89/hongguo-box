@@ -77,6 +77,31 @@ private final class FileDownloader: NSObject, URLSessionDownloadDelegate, @unche
     }
 }
 
+/// 全局解密闸门：同时最多 1 路。
+///
+/// 解密 + 去 CENC 是纯 CPU + 一次性把整个文件读进内存的活。
+/// 播放页在前台播 1080p、后台预取又在解密下一集的话，两路同时开工
+/// 内存和 CPU 都会出现尖峰；串行化之后总耗时几乎不变（单集解密 0.4 秒），
+/// 但尖峰不见了。
+actor DecryptGate {
+    static let shared = DecryptGate(limit: 1)
+    private let limit: Int
+    private var active = 0
+    private var queue: [CheckedContinuation<Void, Never>] = []
+
+    init(limit: Int) { self.limit = limit }
+
+    func acquire() async {
+        if active < limit { active += 1; return }
+        await withCheckedContinuation { queue.append($0) }
+    }
+
+    func release() {
+        if queue.isEmpty { active = max(0, active - 1) }
+        else { queue.removeFirst().resume() }
+    }
+}
+
 /// 全局下载闸门：同时最多 2 路。
 actor DownloadGate {
     static let shared = DownloadGate(limit: 2)
@@ -252,26 +277,44 @@ enum MediaStore {
             return plain
         }
 
-        // 临时密文 -> 解密 -> 去 CENC
+        // 加密轨：先确认下载下来的确实是完整 MP4，再交给解密器。
+        //
+        // 下载被中途掐断（连接断了但 URLSession 没报错）时，文件里的 stco/stsz
+        // 指向的样本偏移会落在这个短文件的末尾之外。解密器是按文件里的偏移
+        // 去写字节的 —— 校验这一道就是不让残缺文件进解密器（以前就是这样闪退的）。
+        guard looksPlayable(staged) else {
+            try? FileManager.default.removeItem(at: staged)
+            throw ApiError.noData
+        }
+
+        // 临时密文 -> 解密 -> 去 CENC（全局串行，避免播放与预取同时解密造成尖峰）
         guard let key = spadeToKey(track.spadeA) else { throw ApiError.noData }
         let dec = staged.appendingPathExtension("dec.mp4")
         defer { try? FileManager.default.removeItem(at: dec) }
-        let stats = decryptAV(staged.path, keyHex: key, outPath: dec.path)
-        guard let v = stats["vide"], v.0 > 0 else { throw ApiError.noData }
-        progress(0.97)
+
+        await DecryptGate.shared.acquire()
         let out = cachedPath(vid: vid, definition: track.definition)
-        // 先写到 .part，校验通过再原子换名。
-        // 原来是 `_ = stripCENC(dec.path, outPath: out.path)`：直接写成品路径，
-        // 返回值（-1 = 失败）被丢掉 —— strip 失败也照样返回「成功」，
-        // 于是把一个残缺文件交给 AVPlayer，就是那一集「解码不出来」。
-        let part = out.appendingPathExtension("part")
-        try? FileManager.default.removeItem(at: part)
-        let delta = stripCENC(dec.path, outPath: part.path)
-        guard delta != -1, looksPlayable(part) else {
+        do {
+            let stats = decryptAV(staged.path, keyHex: key, outPath: dec.path)
+            guard let v = stats["vide"], v.0 > 0 else { throw ApiError.noData }
+            progress(0.97)
+            // 先写到 .part，校验通过再原子换名。
+            // 原来是 `_ = stripCENC(dec.path, outPath: out.path)`：直接写成品路径，
+            // 返回值（-1 = 失败）被丢掉 —— strip 失败也照样返回「成功」，
+            // 于是把一个残缺文件交给 AVPlayer，就是那一集「解码不出来」。
+            let part = out.appendingPathExtension("part")
             try? FileManager.default.removeItem(at: part)
-            throw ApiError.noData
+            let delta = stripCENC(dec.path, outPath: part.path)
+            guard delta != -1, looksPlayable(part) else {
+                try? FileManager.default.removeItem(at: part)
+                throw ApiError.noData
+            }
+            try install(part, at: out)
+        } catch {
+            await DecryptGate.shared.release()
+            throw error
         }
-        try install(part, at: out)
+        await DecryptGate.shared.release()
         pruneIfNeeded()
         progress(1.0)
         return out

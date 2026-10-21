@@ -42,6 +42,10 @@ func findBox(_ d: [UInt8], _ path: [String], _ s: Int, _ e: Int) -> (Int, Int)? 
     return nil
 }
 
+/// 样本数上限：正常一集 1080p 也就几千个样本，给到 400 万足够，
+/// 主要用来挡住损坏文件里的天文数字（防分配爆炸）
+let maxSamples = 4_000_000
+
 /// 解析指定 handler 轨（vide/soun）的样本 (sizes, offs)
 func parseTrackSamples(_ d: [UInt8], handler: String) -> ([Int], [Int]) {
     guard let mv = findBox(d, ["moov"], 0, d.count) else { return ([], []) }
@@ -55,18 +59,24 @@ func parseTrackSamples(_ d: [UInt8], handler: String) -> ([Int], [Int]) {
     guard let stsz = findBox(d, ["stsz"], stbl.0, stbl.1),
           let stsc = findBox(d, ["stsc"], stbl.0, stbl.1) else { return ([], []) }
     let ss = be32(d, stsz.0 + 4), cnt = be32(d, stsz.0 + 8)
+    // 样本数来自文件本身：损坏/截断文件里可能是任意 32 位数，
+    // 直接拿去 [Int](repeating:count:) 会当场分配几十 GB 被系统杀掉。
+    guard cnt >= 0, cnt <= maxSamples else { return ([], []) }
     var sizes = [Int]()
     if ss != 0 { sizes = [Int](repeating: ss, count: cnt) }
     else { for i in 0..<cnt { sizes.append(be32(d, stsz.0 + 12 + 4 * i)) } }
     var ch = [Int]()
     if let stco = findBox(d, ["stco"], stbl.0, stbl.1) {
         let n = be32(d, stco.0 + 4)
+        guard n >= 0, n <= maxSamples else { return ([], []) }
         for i in 0..<n { ch.append(be32(d, stco.0 + 8 + 4 * i)) }
     } else if let co64 = findBox(d, ["co64"], stbl.0, stbl.1) {
         let n = be32(d, co64.0 + 4)
+        guard n >= 0, n <= maxSamples else { return ([], []) }
         for i in 0..<n { ch.append(be64(d, co64.0 + 8 + 8 * i)) }
     }
     let ne = be32(d, stsc.0 + 4)
+    guard ne >= 0, ne <= maxSamples else { return ([], []) }
     var runs = [(Int, Int, Int)]()
     for i in 0..<ne { runs.append((be32(d, stsc.0 + 8 + 12*i), be32(d, stsc.0 + 12 + 12*i), be32(d, stsc.0 + 16 + 12*i))) }
     var spc = [Int](repeating: 0, count: ch.count)
@@ -138,17 +148,34 @@ func aesCTR(_ key: [UInt8], _ iv: [UInt8], _ input: ArraySlice<UInt8>) -> [UInt8
     return r == kCCSuccess ? out : [UInt8](repeating: 0, count: input.count)
 }
 
-func hexBytes(_ h: String) -> [UInt8] {
-    var o = [UInt8](); var i = h.startIndex
-    while i < h.endIndex { let j = h.index(i, offsetBy: 2); o.append(UInt8(h[i..<j], radix: 16)!); i = j }
+/// 十六进制字符串 -> 字节。长度奇数、或含非 hex 字符一律返回 nil。
+///
+/// 原来是 `UInt8(h[i..<j], radix: 16)!` 强解包 + 无长度检查：
+/// spade_a 解出来的 key 只要有一个非 hex 字符就崩在强解包上，
+/// 长度为奇数则 `index(i, offsetBy: 2)` 直接越过 endIndex 崩在字符串下标上。
+/// 这条路径在 1080p 修好之后每次播放/每次后台预取都会走 —— 闪退高发点之一。
+func hexBytes(_ h: String) -> [UInt8]? {
+    guard !h.isEmpty, h.count % 2 == 0 else { return nil }
+    var o = [UInt8](); o.reserveCapacity(h.count / 2)
+    var i = h.startIndex
+    while i < h.endIndex {
+        let j = h.index(i, offsetBy: 2)
+        guard let b = UInt8(h[i..<j], radix: 16) else { return nil }
+        o.append(b); i = j
+    }
     return o
 }
 /// 解密全部加密轨（视频+音频），每轨用自身 senc base_iv
+///
+/// 返回每轨 (自证成功的样本数, 样本总数)，失败返回空字典。
+/// 另外会在 `skipped` 里报告「偏移越界被跳过」的样本数，方便定位坏文件。
 func decryptAV(_ path: String, keyHex: String, outPath: String) -> [String: (Int, Int)] {
     guard var buf = try? [UInt8](Data(contentsOf: URL(fileURLWithPath: path))) else { return [:] }
-    let K = hexBytes(keyHex)
+    // key 必须是 16 字节；长度不对就别往下走（CCCryptor 会直接失败，白跑一趟）
+    guard let K = hexBytes(keyHex), K.count == 16 else { return [:] }
     guard let mv = findBox(buf, ["moov"], 0, buf.count) else { return [:] }
     var stats = [String: (Int, Int)]()
+    var skipped = 0
     for tr in boxes(buf, mv.0, mv.1) where tr.type == "trak" {
         guard let h = findBox(buf, ["mdia", "hdlr"], tr.start + tr.hdr, tr.end) else { continue }
         let handler = fourCC(buf, h.0 + 8)
@@ -157,17 +184,24 @@ func decryptAV(_ path: String, keyHex: String, outPath: String) -> [String: (Int
         let (sizes, offs) = parseTrackSamples(buf, handler: handler)
         if sizes.isEmpty { continue }
         for (idx, o) in offs.enumerated() {
+            guard idx < sizes.count else { break }
+            let sz = sizes[idx]
+            // 关键：o/sz 全部来自文件里的 stco/stsz。下载被截断、或文件本身异常时，
+            // o+sz 会越过 buf 末尾 —— 原来这一行没有边界检查，越界当场 SIGABRT（闪退）。
+            // 现在越界的样本直接跳过，只解能解的那部分。
+            guard sz > 0, o >= 0, o <= buf.count, sz <= buf.count - o else { skipped += 1; continue }
             let ctr = biv &+ UInt64(idx)
             var iv = [UInt8](repeating: 0, count: 16)
             for k in 0..<8 { iv[k] = UInt8((ctr >> UInt64(56 - 8*k)) & 0xff) }
-            let sz = sizes[idx]
             buf[o..<(o+sz)] = ArraySlice(aesCTR(K, iv, buf[o..<(o+sz)]))
         }
         if handler == "vide" {
-            let ok = zip(offs, sizes).filter { nalOK(buf[$0.0..<($0.0+$0.1)]) }.count
+            let ok = zip(offs, sizes).filter { $0.0 >= 0 && $0.1 > 0 && $0.0 + $0.1 <= buf.count
+                && nalOK(buf[$0.0..<($0.0+$0.1)]) }.count
             stats["vide"] = (ok, sizes.count)
         } else { stats["soun"] = (0, sizes.count) }
     }
+    if skipped > 0 { stats["skipped"] = (skipped, 0) }
     try? Data(buf).write(to: URL(fileURLWithPath: outPath))
     return stats
 }

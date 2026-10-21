@@ -124,6 +124,17 @@ enum PlayerAPI {
         ], "mixed_video_id_map": ["1": [vid]]]
     }
 
+    /// 批量接口请求体：官方一次最多 5 个 vid
+    static func multiBody(_ vids: [String]) -> [String: Any] {
+        ["biz_param": [
+            "detail_page_version": 0, "device_level": 3,
+            "disable_digg_stat": false, "disable_video_relate_book": false,
+            "need_all_video_definition": true, "need_mp4_align": false,
+            "use_os_player": false, "use_server_dns": false,
+            "video_platform": 1024,
+        ], "mixed_video_id_map": ["1": Array(vids.prefix(5))]]
+    }
+
     // MARK: - 解析
 
     /// 直链在两种线路里都可能是明文 https，也可能是 base64（桌面版两种都遇到过）
@@ -192,6 +203,73 @@ enum PlayerAPI {
         let inner = asStr(group["video_model"])
         guard !inner.isEmpty else { return .failure(FetchError("无video_model")) }
         return .success(parseTracks(inner))
+    }
+
+    /// 用一套 profile 打批量接口，一次最多取 5 个 vid 的档位。
+    static func multiAttempt(_ p: Profile, vids: [String]) async -> Result<[String: [VideoTrack]], FetchError> {
+        let chunk = Array(vids.prefix(5))
+        guard !chunk.isEmpty else { return .success([:]) }
+        guard let u = URL(string: p.host + multiPath + "?" + fullQuery(p)) else {
+            return .failure(FetchError("URL非法"))
+        }
+        var r = URLRequest(url: u)
+        r.httpMethod = "POST"
+        r.timeoutInterval = 20
+        for h in p.headers { r.setValue(h.1, forHTTPHeaderField: h.0) }
+        guard let raw = try? JSONSerialization.data(withJSONObject: multiBody(chunk)) else {
+            return .failure(FetchError("请求体非法"))
+        }
+        r.httpBody = raw
+        guard let (data, resp) = try? await URLSession.shared.data(for: r) else {
+            return .failure(FetchError("网络失败"))
+        }
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if status != 200 { return .failure(FetchError("HTTP\(status)")) }
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return .failure(FetchError("\(status)/\(data.count)字节"))
+        }
+        let code = asInt(root["code"])
+        if code != 0 { return .failure(FetchError("code\(code)")) }
+        let group = asDict(root["data"])
+        var out: [String: [VideoTrack]] = [:]
+        for vid in chunk {
+            let inner = asStr(asDict(group[vid])["video_model"])
+            if inner.isEmpty { continue }
+            let list = parseTracks(inner)
+            if !list.isEmpty { out[vid] = list }
+        }
+        return out.isEmpty ? .failure(FetchError("无video_model")) : .success(out)
+    }
+
+    /// 批量取档位：每 5 个 vid 一次请求 —— 切集前先把后面几集的地址拿好，
+    /// 5 集一次往返，省掉 4 次「获取播放地址」的等待。
+    /// 只试前 2 套 profile：预取要的是快，不值得把 6 套都轮一遍。
+    static func multiTracks(for vids: [String]) async -> [String: [VideoTrack]] {
+        var want = vids
+        var out: [String: [VideoTrack]] = [:]
+        while !want.isEmpty {
+            let chunk = Array(want.prefix(5))
+            want.removeFirst(chunk.count)
+            for p in profiles.prefix(2) {
+                if case .success(let got) = await multiAttempt(p, vids: chunk) {
+                    out.merge(got) { a, _ in a }
+                    break
+                }
+            }
+        }
+        return out
+    }
+
+    /// 选定要播的档位（播放页与预取共用 —— 保证预取下的就是待会儿要播的那一条，
+    /// 否则预取等于白下）。
+    /// - 手动指定清晰度时**不做编解码过滤**：源站给了就认，播不了交给本机转码
+    /// - 自动选择时优先能直接播的最高清晰度（省掉转码等待）
+    static func pick(_ list: [VideoTrack], force: String?) -> VideoTrack? {
+        if let f = force, let t = list.first(where: { $0.definition == f }) { return t }
+        let ok = playable(list)
+        if let p = ok.first(where: { $0.definition.contains("1080") }) { return p }
+        if let f = ok.first { return f }
+        return list.first
     }
 
     /// 用某一套 profile 打**旧的单条**接口取一次档位（当前静默拒答，保留以防恢复）

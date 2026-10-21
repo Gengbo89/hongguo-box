@@ -185,6 +185,12 @@ enum VideoFit {
 /// 就成了永久卡死，文件其实早已下好，所以点进详情页反而能播。
 final class FeedModel: ObservableObject {
     @Published private(set) var items: [FeedItem] = []
+    /// 全库总量（界面上如实显示），以及推荐流「还能不能再抽一批」
+    private(set) var sampleTotal = 0
+    /// 追加抽样是否在进行中（防重入）
+    private var appending = false
+    /// 推荐流常驻条数上限：约 1200 条，内存恒定在 1MB 以内，不随库大小膨胀
+    static let itemCap = 1200
     @Published private(set) var loading = true
     @Published private(set) var error: String?
     @Published private(set) var poolNote = ""
@@ -202,9 +208,12 @@ final class FeedModel: ObservableObject {
         var note = ""
 
         // 1) 本地全量索引（之前「分类」页建过就有）
-        if let cached = Catalog.loadIndexCache() {
+        // 只抽 240 条随机样本，不再把全库 58 万条解进内存（闪退根因之一）。
+        // 抽样在后台线程做：要顺序扫一遍索引文件。
+        if let cached = await Task.detached(operation: { Catalog.sampleIndexCache(limit: 240) }).value {
             pool = cached.list
-            note = "全量片库 \(pool.count) 部"
+            note = "全量片库 \(cached.total) 部"
+            sampleTotal = cached.total
         }
 
         // 2) 首页板块（一定有，作为保底/补充）
@@ -247,6 +256,42 @@ final class FeedModel: ObservableObject {
         for k in index...(index + prefetchAhead) where items.indices.contains(k) {
             prepareOne(k)
         }
+        // 快滑到底了就再抽一批补上，保证「全库随机」能一直滑下去。
+        // 总量封顶 itemCap：推荐流常驻内存始终是几百条，不随库大小膨胀。
+        if index > items.count - 6, items.count < Self.itemCap, sampleTotal > items.count {
+            appendSample()
+        }
+    }
+
+    /// 再抽一批（去重后追加）。抽样本身在后台线程。
+    private func appendSample() {
+        guard !appending else { return }
+        appending = true
+        Task { @MainActor in
+            defer { appending = false }
+            guard let more = await Task.detached(operation: { Catalog.sampleIndexCache(limit: 240) }).value
+            else { return }
+            var seen = Set(items.map(\.id))
+            let add = more.list.filter { seen.insert($0.id).inserted }
+            guard !add.isEmpty else { return }
+            let room = max(0, Self.itemCap - items.count)
+            items += add.prefix(room).map { FeedItem(series: $0) }
+        }
+    }
+
+    /// 系统内存告警：停预取、把**非当前页**已解析的地址丢掉、缓存按上限收紧。
+    /// 当前正在看的那一页不动，免得画面被打断（内存告急时这一下往往就是
+    /// 「被杀」和「活着」的区别）。
+    func relaxMemory() {
+        for (_, t) in tasks { t.cancel() }
+        tasks.removeAll(); inFlight.removeAll()
+        for i in items.indices where i != currentIndex {
+            switch items[i].status {
+            case .ready, .resolving, .downloading: items[i].status = .pending
+            default: break
+            }
+        }
+        MediaStore.pruneIfNeeded()
     }
 
     /// 切走这个 Tab：把预取全部停掉。
@@ -596,6 +641,9 @@ private struct FeedCard: View {
         if let cur = player?.currentItem?.asset as? AVURLAsset, cur.url == url { return }
         teardown()
         let p = AVPlayer(url: url)
+        // 同播放页：限住前向缓冲，推荐页常驻的播放器不要越读越多
+        p.currentItem?.preferredForwardBufferDuration = 6
+        p.automaticallyWaitsToMinimizeStalling = false
         p.isMuted = muted
         player = p
         // 申请全局播放权：会把上一个还在播的画面停掉
@@ -652,6 +700,15 @@ struct FeedView: View {
             }
         }
         .task { if model.items.isEmpty { await model.load() } }
+        // 内存告警：立刻把非必要的东西放掉，别等系统来杀。
+        // 用 canImport(UIKit) 包住只是为了保住「macOS 上也能跑类型检查」这道本地闸门
+        // （iOS 构建时这段照常生效）。
+        #if canImport(UIKit)
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+            model.relaxMemory()
+        }
+        #endif
         .onChange(of: active) { a in
             if a { model.resume() } else { model.pause() }
         }
