@@ -58,10 +58,10 @@ final class PlayerLogicTests: XCTestCase {
 
     func testSortedByShortEdgeThenSize() {
         let list = [
-            track("avc1", 640, 360, 400_000),     // 短边 360
-            track("avc1", 1920, 1080, 5_000_000), // 短边 1080
-            track("avc1", 1280, 720, 2_000_000),  // 短边 720
-            track("avc1", 1080, 1920, 9_000_000), // 短边 1080，体量更大
+            track("avc1", 640, 360, 400_000),
+            track("avc1", 1920, 1080, 5_000_000),
+            track("avc1", 1280, 720, 2_000_000),
+            track("avc1", 1080, 1920, 9_000_000),
         ]
         let s = PlayerAPI.sorted(list)
         XCTAssertEqual(s.map { min($0.width, $0.height) }, [1080, 1080, 720, 360])
@@ -70,8 +70,8 @@ final class PlayerLogicTests: XCTestCase {
 
     /// 竖屏短剧 width<height，短边必须取 min 而不是直接取 width
     func testShortEdgeUsesMinNotWidth() {
-        let portrait = track("avc1", 720, 1280, 1)   // 短边 720
-        let landscape = track("avc1", 1280, 720, 1)  // 短边 720
+        let portrait = track("avc1", 720, 1280, 1)
+        let landscape = track("avc1", 1280, 720, 1)
         let s = PlayerAPI.sorted([portrait, landscape])
         XCTAssertEqual(s.count, 2)
         XCTAssertEqual(min(s[0].width, s[0].height), 720)
@@ -88,7 +88,7 @@ final class PlayerLogicTests: XCTestCase {
 
     func testTranscodeSourcePicksHighestPlayable() {
         let list = [
-            track("bytevc2", 1080, 1920, 9_000_000),  // 最高清但解不了，不能当转码源
+            track("bytevc2", 1080, 1920, 9_000_000),
             track("bytevc1", 720, 1280, 3_000_000),
             track("hvc1", 540, 960, 1_500_000),
         ]
@@ -131,5 +131,45 @@ final class PlayerLogicTests: XCTestCase {
         XCTAssertEqual(b, b.sorted(by: >), "档位码率不是从高到低：\(b)")
         let e = Rendition.allCases.map { $0.shortEdge }
         XCTAssertEqual(e, e.sorted(by: >), "档位短边不是从高到低：\(e)")
+    }
+
+    // MARK: - 取流降级（2026-10-21 服务端对第三方客户端静默拒答后新增）
+
+    /// 多套 profile 必须真的存在，且顺序固定（主线路优先）
+    func testProfileOrderIsStable() {
+        XCTAssertEqual(PlayerAPI.profiles.map { $0.name }, ["app-b", "app-c", "audit-a"])
+        XCTAssertTrue(PlayerAPI.profiles.allSatisfy { $0.host.hasPrefix("https://") })
+        XCTAssertTrue(PlayerAPI.profiles.allSatisfy { !$0.query.isEmpty })
+    }
+
+    /// 公网候选必须从高到低，最高 1080p，最低 360p
+    func testPublicQualitiesAreDescending() {
+        let e = PlayerAPI.publicQualities.map { min($0.1, $0.2) }
+        XCTAssertEqual(e, e.sorted(by: >), "公网候选档位没有从高到低排")
+        XCTAssertEqual(PlayerAPI.publicQualities.first?.0, "1080p")
+        XCTAssertEqual(PlayerAPI.publicQualities.last?.0, "360p")
+    }
+
+    /// 相同失败原因合并计数，顺序按首次出现
+    func testReasonSummaryMergesDuplicates() {
+        XCTAssertEqual(PlayerAPI.reasonSummary(["200/0字节", "200/0字节", "code100001"]),
+                       "200/0字节×2、code100001")
+    }
+
+    /// 只出现一次不加计数后缀；空列表给空串
+    func testReasonSummarySingleReasonHasNoCount() {
+        XCTAssertEqual(PlayerAPI.reasonSummary(["网络失败"]), "网络失败")
+        XCTAssertEqual(PlayerAPI.reasonSummary([]), "")
+    }
+
+    /// 档位默认没有降级说明；有说明的档位排序后说明不能丢
+    func testNoteDefaultsEmptyAndSurvivesSorting() {
+        XCTAssertEqual(VideoTrack().note, "")
+        var low = track("avc1", 360, 640, 100, spade: "")
+        low.note = "高清接口无档位(200/0字节×3)"
+        let high = track("bytevc1", 1080, 1920, 900)
+        let out = PlayerAPI.sorted([low, high])
+        XCTAssertEqual(out.first?.width, 1080, "1080p 应该排在前面")
+        XCTAssertEqual(out.last?.note, "高清接口无档位(200/0字节×3)", "降级说明被排序丢掉了")
     }
 }

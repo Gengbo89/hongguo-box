@@ -461,11 +461,11 @@ private struct FeedCard: View {
                 .contentShape(Rectangle())
                 .onTapGesture { onPlay() }
 
-            // 清晰度角标
+            // 清晰度角标（取流被拒答降级时前面挂 ⚠️，点进播放页可看原因）
             if let t = item.track, player != nil {
                 VStack {
                     HStack {
-                        Text("\(t.definition) · \(t.codec)")
+                        Text((t.note.isEmpty ? "" : "⚠️ ") + "\(t.definition) · \(t.codec)")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 8).padding(.vertical, 4)

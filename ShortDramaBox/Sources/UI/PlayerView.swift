@@ -179,6 +179,14 @@ struct PlayerView: View {
 
     /// 档位来源标记：本机转码 / 公开明文源
     @ViewBuilder
+    /// 当前这一集正在播的档位所带的降级说明（正常档位为空串）
+    private var playNote: String {
+        let list = availableOf[current.index] ?? []
+        let def = qualityOf[current.index]
+        if let t = list.first(where: { $0.definition == def && !$0.note.isEmpty }) { return t.note }
+        return list.first(where: { !$0.note.isEmpty })?.note ?? ""
+    }
+
     private func sourceBadge(for t: VideoTrack) -> some View {
         if PlayerAPI.needsTranscode(t) {
             Text("本机转码")
@@ -398,6 +406,24 @@ private struct EpisodePage: View {
                 }
                 .allowsHitTesting(false)
                 .opacity(boosting ? 1 : 0)
+
+                // 取流降级提示：官方接口没给出高清档位时，把原因常驻在画面上。
+                // 用户有权知道「为什么只有 360p」，而不是默默变糊。
+                if !playNote.isEmpty {
+                    VStack {
+                        Text("⚠️ " + playNote)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.white)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 9).padding(.vertical, 4)
+                            .background(.orange.opacity(0.72))
+                            .clipShape(Capsule())
+                            .padding(.top, 96)
+                            .padding(.horizontal, 12)
+                        Spacer()
+                    }
+                    .allowsHitTesting(false)
+                }
 
                 // 进度条：默认藏着（不挡画面），点视频下方才露出，3 秒后自动收起。
                 // 不给它上 if：视图树保持恒定，只改透明度和是否可点。

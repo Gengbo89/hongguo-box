@@ -25,6 +25,10 @@ struct VideoTrack: Hashable {
     var url: String = ""
     var spadeA: String = ""
     var codec: String = ""
+    /// 这条档位的来源说明 / 降级原因。空串=正常取自官方接口。
+    /// 回退到公网明文源时会写明「接口为什么没给出高清档位」，
+    /// 让用户看到原因，而不是默默变糊。
+    var note: String = ""
 }
 
 struct HomeSection: Identifiable, Hashable {
