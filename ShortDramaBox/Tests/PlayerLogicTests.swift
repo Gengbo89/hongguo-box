@@ -172,4 +172,98 @@ final class PlayerLogicTests: XCTestCase {
         XCTAssertEqual(out.first?.width, 1080, "1080p 应该排在前面")
         XCTAssertEqual(out.last?.note, "高清接口无档位(200/0字节×3)", "降级说明被排序丢掉了")
     }
+    // MARK: - 批量取流（1080p 主力线路）
+
+    /// 请求体必须是 video_platform=1024 + mixed_video_id_map。
+    /// 这是 2026-10-21 实测唯一能拿到高清的组合：别的 video_platform
+    /// 服务端一律回 `video platform invalid`，而视频号放错字段名也一样。
+    func testMultiBodyUsesPlatform1024AndMixedMap() {
+        let b = PlayerAPI.multiBody("7694961195043785752")
+        let bp = b["biz_param"] as? [String: Any] ?? [:]
+        XCTAssertEqual(bp["video_platform"] as? Int, 1024, "video_platform 必须是 1024")
+        XCTAssertEqual(bp["need_all_video_definition"] as? Bool, true, "必须要求全部档位")
+        let map = b["mixed_video_id_map"] as? [String: [String]] ?? [:]
+        XCTAssertEqual(map["1"], ["7694961195043785752"], "视频号要放在 mixed_video_id_map")
+        XCTAssertNil(b["video_id_list"], "旧的 video_id_list 形态会被服务端拒答")
+        XCTAssertNil(b["video_id"], "批量接口不带单数 video_id")
+    }
+
+    /// 批量接口路径不能写错（旧的单条接口现在一律 0 字节）
+    func testMultiPathIsBatchEndpoint() {
+        XCTAssertEqual(PlayerAPI.multiPath, "/novel/player/multi_video_model/v1/")
+        XCTAssertNotEqual(PlayerAPI.multiPath, PlayerAPI.path)
+    }
+
+    // MARK: - 档位解析
+
+    /// 真机返回的形态：video_model 是 JSON 字符串，档位元数据嵌在
+    /// video_meta / encrypt_info 里（不是平铺在档位对象上）
+    func testParseTracksReadsNestedMetaAndSpade() {
+        let json = """
+        {"status":10,"video_list":[
+          {"main_url":"https://cdn.example/1080.mp4",
+           "video_meta":{"definition":"1080p","vwidth":1080,"vheight":1920,
+                         "size":6628394,"codec_type":"bytevc1"},
+           "encrypt_info":{"encrypt":true,"spade_a":"lrwY9laPLPdVjhvAV4gcx1e8G8VnvBv2"}},
+          {"main_url":"https://cdn.example/360.mp4",
+           "video_meta":{"definition":"360p","vwidth":360,"vheight":640,
+                         "size":2260149,"codec_type":"bytevc1"},
+           "encrypt_info":{"spade_a":"AAAA"}}
+        ]}
+        """
+        let list = PlayerAPI.parseTracks(json)
+        XCTAssertEqual(list.count, 2, "两条档位都要解析出来")
+        XCTAssertEqual(list.first?.definition, "1080p")
+        XCTAssertEqual(list.first?.width, 1080)
+        XCTAssertEqual(list.first?.height, 1920)
+        XCTAssertEqual(list.first?.size, 6628394)
+        XCTAssertEqual(list.first?.codec, "bytevc1")
+        XCTAssertEqual(list.first?.spadeA, "lrwY9laPLPdVjhvAV4gcx1e8G8VnvBv2")
+        XCTAssertTrue(PlayerAPI.isPlayableCodec(list.first?.codec ?? ""), "bytevc1 应能直接播")
+        XCTAssertFalse(PlayerAPI.needsTranscode(list[0]), "bytevc1 不需要本机转码")
+    }
+
+    /// 没有直链的档位不能出现在列表里（否则用户选到就是黑屏）
+    func testParseTracksDropsTracksWithoutURL() {
+        let json = """
+        {"video_list":[
+          {"video_meta":{"definition":"1080p","vwidth":1080,"vheight":1920},
+           "encrypt_info":{"spade_a":"AAAA"}},
+          {"main_url":"https://cdn.example/360.mp4",
+           "video_meta":{"definition":"360p","vwidth":360,"vheight":640},
+           "encrypt_info":{"spade_a":"AAAA"}}
+        ]}
+        """
+        let list = PlayerAPI.parseTracks(json)
+        XCTAssertEqual(list.count, 1, "没直链的那条要被丢掉")
+        XCTAssertEqual(list.first?.definition, "360p")
+    }
+
+    /// 空字典 / 畸形输入不能崩，返回空列表
+    func testParseTracksHandlesGarbage() {
+        XCTAssertTrue(PlayerAPI.parseTracks([String: Any]()).isEmpty)
+        XCTAssertTrue(PlayerAPI.parseTracks("{}").isEmpty)
+        XCTAssertTrue(PlayerAPI.parseTracks("不是JSON").isEmpty)
+        XCTAssertTrue(PlayerAPI.parseTracks("").isEmpty)
+    }
+
+    // MARK: - 直链解码
+
+    /// 直链有时是明文 https，有时是 base64（桌面版两种都遇到过）
+    func testMediaURLHandlesPlainAndBase64() {
+        let plain = "https://v95.example/1080.mp4"
+        XCTAssertEqual(PlayerAPI.mediaURL(["main_url": plain]), plain)
+
+        let enc = Data(plain.utf8).base64EncodedString()
+        XCTAssertEqual(PlayerAPI.mediaURL(["main_url": enc]), plain, "base64 直链要解出来")
+
+        XCTAssertEqual(PlayerAPI.mediaURL([:]), "")
+        XCTAssertEqual(PlayerAPI.mediaURL(["main_url": "%%%"]), "")
+    }
+
+    /// main_url 不在时退回 backup_url
+    func testMediaURLFallsBackToBackup() {
+        let backup = "https://backup.example/720.mp4"
+        XCTAssertEqual(PlayerAPI.mediaURL(["main_url": "", "backup_url": backup]), backup)
+    }
 }

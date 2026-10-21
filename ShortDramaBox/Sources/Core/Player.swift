@@ -1,18 +1,27 @@
 import Foundation
 
-/// 游客身份取流：无需签名 / 登录 / Cookie（逆向自桌面版后端）
+/// 游客身份取流：无需签名 / 登录 / Cookie（逆向自桌面版后端 hongguo.py）
 ///
-/// ⚠️ 2026-10-21 实测：官方取流接口对第三方客户端**静默拒答**：
-///    POST /novel/player/video_model/v1/ 一律返回 `HTTP 200 + 0 字节`，
-///    与请求体、请求头、host、出口 IP 均无关：
-///    · 两个完全不同的出口 IP（家宽 111.4.83.x / 阿里云杭州 112.124.63.35）结果一致
-///    · 当年实测可用的原始脚本原样重跑，同样 0 字节
-///    · 带/不带 x-ss-stub（MD5(body)）结果一致 —— 该签名已不被接受
-///    · 桌面版（原项目）依赖外部签名服务 / Frida 预言机取真签名，
-///      说明服务端已要求真正的 App 签名（x-gorgon/x-argus 一系）
-///    所以这里**依次尝试多套 profile**（多 host / 多 UA / 多参数组合），
-///    任何一套通了就立刻用高清；全都不通时回退公网明文，
-///    并把「为什么没有高清」写进 `VideoTrack.note` 让界面显示 —— 绝不静默变糊。
+/// 按顺序尝试三条线路：
+///
+/// 1. **批量取流（主力，实测可用）** `POST /novel/player/multi_video_model/v1/`
+///    要点全在请求体里（逆向自桌面版）：
+///      · `biz_param.video_platform = 1024` —— 换成别的值服务端一律回
+///        `video platform invalid, param:N`（0..120、1000、2000、9999 全试过）
+///      · 视频号放在 `mixed_video_id_map` 里，**不是** `video_id_list`
+///    2026-10-21 实测：匿名请求直接 `code=0`，5 档齐全
+///    （1080p 1080x1920 / 720p / 540p / 480p / 360p，全 bytevc1 + spade_a），
+///    1080p 直链 6,628,394 字节，可解密播放。
+///
+/// 2. **旧的单条接口** `POST /novel/player/video_model/v1/`：
+///    同一时期对第三方客户端**静默拒答**——HTTP 200 但 0 字节，
+///    与请求体、请求头、host、出口 IP（家宽 / 阿里云杭州）都无关，
+///    带不带 `x-ss-stub`(MD5(body)) 也一样。留着它只是万一哪天恢复。
+///
+/// 3. **公网明文兜底** `https://hongguoduanju.com/video/public/<vid>/<档位>.mp4`：
+///    站点目前只放了 360p（1080p/720p/540p/480p/240p 全 404），
+///    仍并发探测全部档位，哪天上高清就自动用上。走到这一步会把
+///    「为什么没有高清」写进 `VideoTrack.note`，界面上直接显示，绝不静默变糊。
 enum PlayerAPI {
     // MARK: - 请求 profile
 
@@ -24,7 +33,10 @@ enum PlayerAPI {
         let headers: [(String, String)]
     }
 
+    /// 旧的单条接口路径（当前静默拒答）
     static let path = "/novel/player/video_model/v1/"
+    /// 批量接口路径（主力）
+    static let multiPath = "/novel/player/multi_video_model/v1/"
 
     /// 安卓 App 请求参数（逆向自 7.3.5.32 客户端）
     static let appQuery: [(String, String)] = [
@@ -85,21 +97,106 @@ enum PlayerAPI {
         return (a, b)
     }
 
-    // MARK: - 单次请求
+    /// 拼上游客设备号的完整查询串
+    static func fullQuery(_ p: Profile) -> String {
+        let g = guestDevice
+        return p.query.map { "\($0.0)=\($0.1)" }.joined(separator: "&")
+            + "&device_id=\(g.id)&iid=\(g.iid)"
+    }
 
-    /// 请求体（官方客户端固定这份结构）
+    // MARK: - 请求体
+
+    /// 旧的单条接口请求体
     static func body(_ vid: String) -> [String: Any] {
         ["video_id": vid, "content_type": 1,
          "biz_param": ["need_all_video_definition": true, "video_platform": 3]]
     }
 
-    /// 用某一套 profile 取一次档位。
+    /// 批量接口请求体（逆向自桌面版 hongguo.py）
+    /// `video_platform: 1024` 是唯一被接受的平台号；视频号放 `mixed_video_id_map`。
+    static func multiBody(_ vid: String) -> [String: Any] {
+        ["biz_param": [
+            "detail_page_version": 0, "device_level": 3,
+            "disable_digg_stat": false, "disable_video_relate_book": false,
+            "need_all_video_definition": true, "need_mp4_align": false,
+            "use_os_player": false, "use_server_dns": false,
+            "video_platform": 1024,
+        ], "mixed_video_id_map": ["1": [vid]]]
+    }
+
+    // MARK: - 解析
+
+    /// 直链在两种线路里都可能是明文 https，也可能是 base64（桌面版两种都遇到过）
+    static func mediaURL(_ item: [String: Any]) -> String {
+        for key in ["main_url", "backup_url"] {
+            let v = asStr(item[key])
+            if v.isEmpty { continue }
+            if v.hasPrefix("http") { return v }
+            if let d = Data(base64Encoded: v), let s = String(data: d, encoding: .utf8),
+               s.hasPrefix("http") { return s }
+        }
+        return ""
+    }
+
+    /// 把一份 video_model（字典，或 JSON 字符串）解析成档位列表。
+    /// 批量接口与旧的单条接口共用这份结构：
+    /// `video_list[].video_meta{definition,vwidth,vheight,size,codec_type}`
+    /// `video_list[].encrypt_info{spade_a}`
+    static func parseTracks(_ model: Any) -> [VideoTrack] {
+        var vm = asDict(model)
+        if vm.isEmpty, let s = model as? String, let d = s.data(using: .utf8),
+           let o = (try? JSONSerialization.jsonObject(with: d)) {
+            vm = asDict(o)
+        }
+        return asArr(vm["video_list"]).map { raw -> VideoTrack in
+            let it = asDict(raw), m = asDict(it["video_meta"]), e = asDict(it["encrypt_info"])
+            var t = VideoTrack()
+            t.definition = asStr(m["definition"])
+            t.width = asInt(m["vwidth"]); t.height = asInt(m["vheight"])
+            t.size = asInt(m["size"]); t.codec = asStr(m["codec_type"])
+            t.url = mediaURL(it)
+            t.spadeA = asStr(e["spade_a"])
+            return t
+        }.filter { !$0.url.isEmpty }
+    }
+
+    // MARK: - 单次请求
+
+    /// 用某一套 profile 打**批量**接口取一次档位（主力线路）。
     /// 失败时返回**简短原因**（给用户看的）：`200/0字节`、`HTTP404`、`code100001`…
+    static func multiAttempt(_ p: Profile, vid: String) async -> Result<[VideoTrack], FetchError> {
+        guard let u = URL(string: p.host + multiPath + "?" + fullQuery(p)) else {
+            return .failure(FetchError("URL非法"))
+        }
+        var r = URLRequest(url: u)
+        r.httpMethod = "POST"
+        r.timeoutInterval = 20
+        for h in p.headers { r.setValue(h.1, forHTTPHeaderField: h.0) }
+        guard let raw = try? JSONSerialization.data(withJSONObject: multiBody(vid)) else {
+            return .failure(FetchError("请求体非法"))
+        }
+        r.httpBody = raw
+        guard let (data, resp) = try? await URLSession.shared.data(for: r) else {
+            return .failure(FetchError("网络失败"))
+        }
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if status != 200 { return .failure(FetchError("HTTP\(status)")) }
+        // 空体 / 非 JSON：服务端风控拒答的典型形态
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return .failure(FetchError("\(status)/\(data.count)字节"))
+        }
+        let code = asInt(root["code"])
+        if code != 0 { return .failure(FetchError("code\(code)")) }
+        // data 以 vid 为键，值里带一个 JSON 字符串形式的 video_model
+        let group = asDict(asDict(root["data"])[vid])
+        let inner = asStr(group["video_model"])
+        guard !inner.isEmpty else { return .failure(FetchError("无video_model")) }
+        return .success(parseTracks(inner))
+    }
+
+    /// 用某一套 profile 打**旧的单条**接口取一次档位（当前静默拒答，保留以防恢复）
     static func attempt(_ p: Profile, vid: String) async -> Result<[VideoTrack], FetchError> {
-        let g = guestDevice
-        let q = p.query.map { "\($0.0)=\($0.1)" }.joined(separator: "&")
-            + "&device_id=\(g.id)&iid=\(g.iid)"
-        guard let u = URL(string: p.host + path + "?" + q) else {
+        guard let u = URL(string: p.host + path + "?" + fullQuery(p)) else {
             return .failure(FetchError("URL非法"))
         }
         var r = URLRequest(url: u)
@@ -115,7 +212,6 @@ enum PlayerAPI {
         }
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
         if status != 200 { return .failure(FetchError("HTTP\(status)")) }
-        // 空体 / 非 JSON：服务端风控拒答的典型形态
         guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             return .failure(FetchError("\(status)/\(data.count)字节"))
         }
@@ -124,21 +220,14 @@ enum PlayerAPI {
         guard let inner = asStr(asDict(root["data"])["video_model"]).data(using: .utf8),
               let vm = (try? JSONSerialization.jsonObject(with: inner)) as? [String: Any]
         else { return .failure(FetchError("无video_model")) }
-        let list = asArr(vm["video_list"]).map { raw -> VideoTrack in
-            let it = asDict(raw), m = asDict(it["video_meta"]), e = asDict(it["encrypt_info"])
-            var t = VideoTrack()
-            t.definition = asStr(m["definition"])
-            t.width = asInt(m["vwidth"]); t.height = asInt(m["vheight"])
-            t.size = asInt(m["size"]); t.codec = asStr(m["codec_type"])
-            t.url = asStr(it["main_url"]).isEmpty ? asStr(it["backup_url"]) : asStr(it["main_url"])
-            t.spadeA = asStr(e["spade_a"])
-            return t
-        }.filter { !$0.url.isEmpty }
-        return .success(list)
+        return .success(parseTracks(vm))
     }
 
     /// 取流（单入口）：任一套 profile 通就返回；全不通抛错。
     static func videoModel(_ vid: String) async throws -> [VideoTrack] {
+        for p in profiles {
+            if case .success(let t) = await multiAttempt(p, vid: vid), !t.isEmpty { return t }
+        }
         for p in profiles {
             if case .success(let t) = await attempt(p, vid: vid), !t.isEmpty { return t }
         }
@@ -252,9 +341,20 @@ enum PlayerAPI {
 
     /// 全部档位，**一条都不过滤**，按清晰度从高到低。
     /// 播不了的档位也照样返回，由播放器决定走本机转码。
-    /// 接口全不通时回退公网明文，并把失败原因写进 `note`。
+    /// 三条线路全不通时回退公网明文，并把失败原因写进 `note`。
     static func allTracks(for vid: String) async -> [VideoTrack] {
         var reasons: [String] = []
+        // 1) 批量接口（主力）
+        for p in profiles {
+            switch await multiAttempt(p, vid: vid) {
+            case .success(let t):
+                if !t.isEmpty { return sorted(t) }
+                reasons.append("批量空档位")
+            case .failure(let e):
+                reasons.append("批量" + e.why)
+            }
+        }
+        // 2) 旧的单条接口
         for p in profiles {
             switch await attempt(p, vid: vid) {
             case .success(let t):
