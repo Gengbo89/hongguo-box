@@ -177,8 +177,6 @@ struct PlayerView: View {
         }
     }
 
-    /// 档位来源标记：本机转码 / 公开明文源
-    @ViewBuilder
     /// 当前这一集正在播的档位所带的降级说明（正常档位为空串）
     private var playNote: String {
         let list = availableOf[current.index] ?? []
@@ -187,6 +185,8 @@ struct PlayerView: View {
         return list.first(where: { !$0.note.isEmpty })?.note ?? ""
     }
 
+    /// 档位来源标记：本机转码 / 公开明文源
+    @ViewBuilder
     private func sourceBadge(for t: VideoTrack) -> some View {
         if PlayerAPI.needsTranscode(t) {
             Text("本机转码")
