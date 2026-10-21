@@ -113,8 +113,9 @@ final class PlayerLogicTests: XCTestCase {
         XCTAssertEqual(Rendition.nearest(atMost: 600), .p540)
         XCTAssertEqual(Rendition.nearest(atMost: 539), .p480)
         XCTAssertEqual(Rendition.nearest(atMost: 479), .p360)
-        XCTAssertEqual(Rendition.nearest(atMost: 359), .p360)
-        // 比最低档还低时没有合适档位，不能硬塞一个更高的
+        XCTAssertEqual(Rendition.nearest(atMost: 360), .p360)
+        // 比最低档还低：没有合适档位，不能硬塞一个更高的档
+        XCTAssertNil(Rendition.nearest(atMost: 359))
         XCTAssertNil(Rendition.nearest(atMost: 100))
     }
 
