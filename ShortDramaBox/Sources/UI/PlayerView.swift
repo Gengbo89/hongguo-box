@@ -200,6 +200,13 @@ struct PlayerView: View {
 
 // MARK: - 单集页面（自己管自己的播放器）
 
+/// 长按加速的状态盒。必须是引用类型：手势闭包捕获的是 @State 的值快照，
+/// body 一重算就可能拿到旧的那份，恢复倍速那一步会被静默跳过。
+private final class BoostBox {
+    var on = false
+    var base: Float = 1.0
+}
+
 private struct EpisodePage: View {
     let series: Series
     let episode: Episode
@@ -227,6 +234,8 @@ private struct EpisodePage: View {
     @State private var paused = false
     /// 长按快进中
     @State private var boosting = false
+    /// 长按加速的权威状态（引用类型，闭包读到的永远是当前值）
+    @State private var boost = BoostBox()
 
     /// 长按快进的倍速
     private static let boostRate: Float = 1.5
@@ -265,43 +274,37 @@ private struct EpisodePage: View {
                     .onTapGesture { togglePlay() }
                     .onLongPressGesture(
                         minimumDuration: 0.25, maximumDistance: 30,
-                        perform: {
-                            // 用自己记的暂停状态判断，不看 timeControlStatus：
-                            // 缓冲、seek 的时候它不是 .playing，长按就会没反应
-                            // ——之前「长按不好用」就是这个原因。
-                            // 已经暂停时不进快进，免得一按反而播起来。
-                            guard let p = player, !paused else { return }
-                            boosting = true
-                            p.rate = Self.boostRate
-                        },
-                        onPressingChanged: { pressing in
-                            // 松手或手指移开 → 回原速
-                            if !pressing, boosting {
-                                boosting = false
-                                player?.rate = speed
-                            }
+                        perform: { beginBoost() },
+                        onPressingChanged: { _ in
+                            // 松手恢复原速；下一次按下也顺手恢复一次，
+                            // 万一某次手势被打断没收到底，下一次触摸能补回来。
+                            endBoost()
                         })
 
-                if paused {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 44))
-                        .foregroundStyle(.white.opacity(0.9))
-                        .shadow(color: .black.opacity(0.6), radius: 12)
-                        .allowsHitTesting(false)
-                }
-                if boosting {
-                    VStack {
-                        Text(String(format: "%gx 加速中", Self.boostRate))
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 11).padding(.vertical, 5)
-                            .background(.black.opacity(0.55))
-                            .clipShape(Capsule())
-                            .padding(.top, 64)
-                        Spacer()
-                    }
+                // 注意：下面两块**不能**写成 if paused { } / if boosting { }。
+                // 条件插入/移除子视图会让 SwiftUI 重建这个手势，
+                // 「松手」回调于是落到改之前那个闭包上 —— 里面状态还是旧值，
+                // 恢复被跳过，倍速就卡在 1.5x 回不来。
+                // 固定视图树、只改透明度，手势实例就不会被换掉。
+
+                Image(systemName: "play.fill")
+                    .font(.system(size: 44))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .shadow(color: .black.opacity(0.6), radius: 12)
                     .allowsHitTesting(false)
+                    .opacity(paused ? 1 : 0)
+                VStack {
+                    Text(String(format: "%gx 加速中", Self.boostRate))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 11).padding(.vertical, 5)
+                        .background(.black.opacity(0.55))
+                        .clipShape(Capsule())
+                        .padding(.top, 64)
+                    Spacer()
                 }
+                .allowsHitTesting(false)
+                .opacity(boosting ? 1 : 0)
             } else {
                 VStack(spacing: 14) {
                     if failed {
@@ -334,7 +337,12 @@ private struct EpisodePage: View {
         .onChange(of: isActive) { act in
             if act { Task { await start() } } else { player?.pause(); paused = false }
         }
-        .onChange(of: speed) { s in applySpeed(s) }
+        .onChange(of: speed) { s in
+            // 换倍速时如果还在长按加速，先退出，免得恢复成旧值
+            endBoost()
+            applySpeed(s)
+        }
+        .onChange(of: paused) { p in if p { endBoost() } }
         .onChange(of: forceQuality) { _ in
             // 换清晰度：重新拉这一集
             if isActive, forceQuality != nil { Task { await start(force: true) } }
@@ -429,6 +437,27 @@ private struct EpisodePage: View {
         }
     }
 
+    /// 开始长按加速：记下原倍速，再抬到加速倍速。
+    private func beginBoost() {
+        // 用自己记的暂停状态判断，不看 timeControlStatus：
+        // 缓冲、seek 的时候它不是 .playing，长按就会没反应
+        // ——之前「长按不好用」就是这个原因。
+        // 已经暂停时不进快进，免得一按反而播起来。
+        guard let p = player, !paused else { return }
+        boost.base = speed
+        boost.on = true
+        boosting = true
+        p.rate = Self.boostRate
+    }
+
+    /// 结束长按加速、恢复原倍速。可重复调用（不在加速中就是空操作）。
+    private func endBoost() {
+        guard boost.on else { return }
+        boost.on = false
+        boosting = false
+        player?.rate = boost.base
+    }
+
     private func applySpeed(_ s: Float) {
         player?.defaultRate = s
         if player?.timeControlStatus == .playing { player?.rate = s }
@@ -442,6 +471,7 @@ private struct EpisodePage: View {
             if sec.isFinite, sec > 0 { lastPosition = sec }
         }
         stopWatching()
+        endBoost()
         boosting = false; paused = false
         if let o = timeObs { player?.removeTimeObserver(o); timeObs = nil }
         if let o = endObs { NotificationCenter.default.removeObserver(o); endObs = nil }
