@@ -1,30 +1,30 @@
-构建 #25  2026-10-20T10:03:00Z
-commit: 4f9571eb08d97d00fc7574c76b2a561de8517c56
-IPA 字节数: 22223830
+构建 #26  2026-10-21T01:21:14Z
+commit: cfa62cfaf1b8eb1ea75ab3f18fd94eeef906fcb2
+IPA 字节数: 22239871
 --- IPA 内容 ---
 Archive:  ShortDramaBox-unsigned.ipa
   Length      Date    Time    Name
 ---------  ---------- -----   ----
-        0  10-20-2026 10:02   Payload/
-        0  10-20-2026 10:02   Payload/ShortDramaBox.app/
-     5121  10-20-2026 10:02   Payload/ShortDramaBox.app/AppIcon60x60@2x.png
- 21482531  10-20-2026 10:02   Payload/ShortDramaBox.app/index.bin.z
-   353704  10-20-2026 10:02   Payload/ShortDramaBox.app/Assets.car
-     6753  10-20-2026 10:02   Payload/ShortDramaBox.app/AppIcon76x76@2x~ipad.png
-     1104  10-20-2026 10:02   Payload/ShortDramaBox.app/Info.plist
-        8  10-20-2026 10:02   Payload/ShortDramaBox.app/PkgInfo
-  1911912  10-20-2026 10:02   Payload/ShortDramaBox.app/ShortDramaBox
+        0  10-21-2026 01:21   Payload/
+        0  10-21-2026 01:21   Payload/ShortDramaBox.app/
+     5121  10-21-2026 01:21   Payload/ShortDramaBox.app/AppIcon60x60@2x.png
+ 21482531  10-21-2026 01:21   Payload/ShortDramaBox.app/index.bin.z
+   353704  10-21-2026 01:21   Payload/ShortDramaBox.app/Assets.car
+     6753  10-21-2026 01:21   Payload/ShortDramaBox.app/AppIcon76x76@2x~ipad.png
+     1104  10-21-2026 01:21   Payload/ShortDramaBox.app/Info.plist
+        8  10-21-2026 01:21   Payload/ShortDramaBox.app/PkgInfo
+  1976056  10-21-2026 01:21   Payload/ShortDramaBox.app/ShortDramaBox
 ---------                     -------
- 23761133                     9 files
+ 23825277                     9 files
 app: /tmp/ck/Payload/ShortDramaBox.app
 --- Info.plist ---
 com.duanju.box
 短剧盒子
-1.0.25
+1.0.26
 17.0
 --- 可执行文件 ---
--rwxr-xr-x  1 runner  wheel  1911912 Oct 20 10:02 /tmp/ck/Payload/ShortDramaBox.app/ShortDramaBox
+-rwxr-xr-x  1 runner  wheel  1976056 Oct 21 01:21 /tmp/ck/Payload/ShortDramaBox.app/ShortDramaBox
 /tmp/ck/Payload/ShortDramaBox.app/ShortDramaBox: Mach-O 64-bit executable arm64
 Non-fat file: /tmp/ck/Payload/ShortDramaBox.app/ShortDramaBox is architecture: arm64
 --- SHA256 ---
-443e07c9e94ce96e20962aca32c41be14abb4e9931f53090942a9fe0955cc9a3  ShortDramaBox-unsigned.ipa
+194a92ab7b0fcc94518002220436fb96c4bf7de896e8aee783322b853ade7553  ShortDramaBox-unsigned.ipa
