@@ -18,6 +18,8 @@ struct PlayerView: View {
     /// 每集源站给的全部档位（一条都不过滤），key 是集号
     @State private var availableOf: [Int: [VideoTrack]] = [:]
     @State private var preferredQuality: String? = nil
+    /// 下一集预下载任务（换集/退出时取消）
+    @State private var prefetchTask: Task<Void, Never>? = nil
 
     init(series: Series, episodes: [Episode], start: Episode) {
         self.series = series; self.episodes = episodes; _current = State(initialValue: start)
@@ -65,10 +67,41 @@ struct PlayerView: View {
             .ignoresSafeArea()
         }
         .onChange(of: scrolledID) { v in
-            if let v, let e = episodes.first(where: { $0.index == v }) { current = e }
+            if let v, let e = episodes.first(where: { $0.index == v }) {
+                current = e
+                prefetchWindow(from: e)
+            }
         }
+        .onAppear { prefetchWindow(from: current) }
+        .onDisappear { prefetchTask?.cancel() }
         .overlay(alignment: .topLeading) { topBar }
         .sheet(isPresented: $showPanel) { panel }
+    }
+
+    /// 预取窗口：把后面 5 集的地址一次批量取好（一次请求），
+    /// 并预下载下一集，滑过去直接开播。
+    private func prefetchWindow(from ep: Episode) {
+        guard let idx = episodes.firstIndex(where: { $0.index == ep.index }) else { return }
+        let upcoming = episodes.dropFirst(idx + 1).prefix(5)
+        guard !upcoming.isEmpty else { return }
+        TrackCache.shared.prefetch(upcoming.map(\.vid))
+        if let next = upcoming.first { prefetchMedia(next) }
+    }
+
+    /// 预下载 + 解密下一集（选的是和播放同一个 pick，保证切集时命中缓存）。
+    /// 走 MediaStore 的全局下载闸门，不会和当前集抢带宽；解码闸门保证不同时解密两路。
+    private func prefetchMedia(_ ep: Episode) {
+        prefetchTask?.cancel()
+        prefetchTask = Task {
+            var list = TrackCache.shared.cached(ep.vid) ?? []
+            if list.isEmpty {
+                list = await PlayerAPI.allTracks(for: ep.vid)
+                TrackCache.shared.put(ep.vid, list)
+            }
+            guard !list.isEmpty, !Task.isCancelled,
+                  let best = PlayerAPI.pick(list, force: nil) else { return }
+            _ = try? await MediaStore.prepareForPlayback(vid: ep.vid, track: best, pool: list) { _ in }
+        }
     }
 
     private var topBar: some View {
@@ -722,19 +755,6 @@ private struct ScrubBar: View {
         player?.pause(); player = nil
     }
 
-    /// 选定要播的档位。
-    /// - 手动指定清晰度时，**不做任何编解码过滤** —— 源站给了就认，播不了交给本机转码
-    /// - 自动选择时优先能直接播的最高清晰度（省掉转码等待）
-    /// 传入的 list 已按清晰度从高到低排好。
-    private static func pick(_ list: [VideoTrack], force: String?) -> VideoTrack? {
-        if let f = force, let t = list.first(where: { $0.definition == f }) { return t }
-        let ok = PlayerAPI.playable(list)
-        if let p = ok.first(where: { $0.definition.contains("1080") }) { return p }
-        if let f = ok.first { return f }
-        // 一条都直接播不了：挑最高清晰度并本机转码
-        return list.first
-    }
-
     private func start(force: Bool = false) async {
         // 播放器还在：直接续上。
         //
@@ -759,14 +779,20 @@ private struct ScrubBar: View {
 
         do {
             if tracks.isEmpty {
-                // 取全部档位：一条都不过滤，播不了的留到后面本机转码
-                tracks = await PlayerAPI.allTracks(for: episode.vid)
+                // 先看批量预取有没有提前取好这一集（有就直接省掉一次往返）
+                if let hit = TrackCache.shared.cached(episode.vid) {
+                    tracks = hit
+                } else {
+                    // 取全部档位：一条都不过滤，播不了的留到后面本机转码
+                    tracks = await PlayerAPI.allTracks(for: episode.vid)
+                    TrackCache.shared.put(episode.vid, tracks)
+                }
                 if tracks.isEmpty {
                     status = "该集暂无可用片源"; failed = true; return
                 }
             }
             onTracks(tracks)
-            guard let best = Self.pick(tracks, force: forceQuality) else {
+            guard let best = PlayerAPI.pick(tracks, force: forceQuality) else {
                 status = "无可用清晰度"; failed = true; return
             }
             onQuality(best.definition)
@@ -786,6 +812,11 @@ private struct ScrubBar: View {
                 }
             }
             let p = AVPlayer(url: url)
+            // 限住前向缓冲：本地文件 AVPlayer 会尽量往前读，1080p 一集 6.6MB
+            // 它会整集读进内存。限成 6 秒之后播放期间的内存曲线立刻平下来
+            // （本地文件主要靠这条兜住显存外的读取缓冲）。
+            p.currentItem?.preferredForwardBufferDuration = 6
+            p.automaticallyWaitsToMinimizeStalling = false
             p.defaultRate = speed
             player = p
             // 一建好就盯上：解码器报错、播到一半中断、迟迟不出画面，
