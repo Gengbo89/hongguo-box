@@ -76,9 +76,9 @@ struct PosterCard: View {
 /// 官方批量接口 `mixed_video_id_map` 一次能取 5 个 vid 的档位。
 /// 播放页拿它把后面几集的地址提前取好，滑到下一集就不用再等一次
 /// 「获取播放地址…」；顺手把下一集的片子也预下载解密好，切集直接开播。
-@MainActor
-final class TrackCache: ObservableObject {
+final class TrackCache: @unchecked Sendable {
     static let shared = TrackCache()
+    private let lock = NSLock()
     /// 缓存上限：一集档位约 1KB，60 集也就几十 KB，不会成为内存负担
     private let cap = 60
     private var store: [String: [VideoTrack]] = [:]
@@ -87,9 +87,13 @@ final class TrackCache: ObservableObject {
     private var tried: Set<String> = []
     private var inFlight: Set<String> = []
 
-    func cached(_ vid: String) -> [VideoTrack]? { store[vid] }
+    func cached(_ vid: String) -> [VideoTrack]? {
+        lock.lock(); defer { lock.unlock() }
+        return store[vid]
+    }
 
     func put(_ vid: String, _ list: [VideoTrack]) {
+        lock.lock(); defer { lock.unlock() }
         tried.insert(vid)
         guard !list.isEmpty else { return }
         if store[vid] == nil { order.append(vid) }
@@ -100,20 +104,32 @@ final class TrackCache: ObservableObject {
     }
     /// 批量预取（内部按 5 个一组切分请求）。已缓存/在飞/试过的不重复发。
     func prefetch(_ vids: [String]) {
+        lock.lock()
         let want = vids.filter { store[$0] == nil && !inFlight.contains($0) && !tried.contains($0) }
-        guard !want.isEmpty else { return }
         for v in want { inFlight.insert(v) }
+        lock.unlock()
+        guard !want.isEmpty else { return }
         Task {
             let got = await PlayerAPI.multiTracks(for: want)
+            lock.lock()
             for v in want {
                 inFlight.remove(v)
-                if let list = got[v] { put(v, list) } else { tried.insert(v) }
+                if let list = got[v], !list.isEmpty {
+                    if store[v] == nil { order.append(v) }
+                    store[v] = list
+                    while order.count > cap, let first = order.first {
+                        order.removeFirst(); store[first] = nil
+                    }
+                } else {
+                    tried.insert(v)
+                }
             }
-            objectWillChange.send()
+            lock.unlock()
         }
     }
     /// 换剧时清掉上一部的缓存，免得越积越多
     func clear() {
+        lock.lock(); defer { lock.unlock() }
         store.removeAll(); order.removeAll(); tried.removeAll()
     }
 }
