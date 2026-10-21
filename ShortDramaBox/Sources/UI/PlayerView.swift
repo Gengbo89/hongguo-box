@@ -361,7 +361,7 @@ private struct EpisodePage: View {
                                     videoSize: videoSize)
                 }
 
-                // 手势层：短按暂停/继续，长按住 1.5x 加速、松手恢复原倍速。
+                // 手势层：短按暂停/继续，长按住 2x 加速、松手恢复原倍速。
                 // 用 onLongPressGesture 而不是 DragGesture(minimumDistance:0)：
                 // 后者套在分页 ScrollView 里容易和翻页抢手势，
                 // maximumDistance 让手指挪超过 30 点就直接交给翻页。
