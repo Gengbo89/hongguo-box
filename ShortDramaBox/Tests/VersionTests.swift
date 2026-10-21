@@ -28,10 +28,10 @@ final class VersionTests: XCTestCase {
         <feed><title>Release notes from hongguo-box</title>
         <entry><id>tag:github.com,2008:Repository/1/v1.0.2</id>
         <link rel="alternate" type="text/html" href="https://github.com/Gengbo89/hongguo-box/releases/tag/v1.0.2"/>
-        <title>短剧盒子 iOS 测试版 1.0.2</title></entry>
+        <title>短剧盒子 iOS 1.0.2</title></entry>
         <entry><id>tag:github.com,2008:Repository/1/v1.0.0</id>
         <link rel="alternate" type="text/html" href="https://github.com/Gengbo89/hongguo-box/releases/tag/v1.0.0"/>
-        <title>短剧盒子 iOS 测试版 1.0.0</title></entry>
+        <title>短剧盒子 iOS 1.0.0</title></entry>
         </feed>
         """
         XCTAssertEqual(UpdateChecker.latestTag(in: feed), "v1.0.2")
@@ -39,7 +39,12 @@ final class VersionTests: XCTestCase {
 
     /// 链接匹配不上时，靠标题兜底
     func testLatestTagFromTitleOnly() {
-        XCTAssertEqual(UpdateChecker.latestTag(in: "<title>短剧盒子 iOS 测试版 1.0.5</title>"), "1.0.5")
+        XCTAssertEqual(UpdateChecker.latestTag(in: "<title>短剧盒子 iOS 1.0.5</title>"), "1.0.5")
+    }
+
+    /// 标题去掉「测试版 / build」之后的格式，兜底解析依然成立
+    func testLatestTagFromPlainTitle() {
+        XCTAssertEqual(UpdateChecker.latestTag(in: "<title>短剧盒子 iOS 1.0.7</title>"), "1.0.7")
     }
 
     /// 过渡期 feed 里还留着 build-N，新规则不该误认成版本号

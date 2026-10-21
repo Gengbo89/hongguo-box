@@ -185,7 +185,7 @@ jobs:
           装完在 iPhone 的「设置 → 通用 → VPN 与设备管理」里信任证书。
           免费账号签名 7 天过期，重跑一次 Sideloadly 续期即可，数据不丢。"
           gh release create "$TAG" ShortDramaBox-unsigned.ipa \
-            --title "短剧盒子 iOS 测试版 ${VER}（build-${GITHUB_RUN_NUMBER}）" \
+            --title "短剧盒子 iOS ${VER}" \
             --notes "$NOTES" \
             --latest || echo "发布失败（可能已存在）"
 

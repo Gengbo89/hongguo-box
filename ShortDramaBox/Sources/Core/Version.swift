@@ -62,7 +62,7 @@ final class UpdateChecker: ObservableObject {
     }
 
     /// 从 atom feed 里取第一个版本号：<id>…/releases/tag/v1.0.3</id>
-    /// 标题（「短剧盒子 iOS 测试版 1.0.3」）作为兜底。
+    /// 标题（「短剧盒子 iOS 1.0.3」）作为兜底。
     static func latestTag(in xml: String) -> String? {
         let patterns = [
             #"/releases/tag/(v?[0-9]+\.[0-9]+\.[0-9]+)"#,
