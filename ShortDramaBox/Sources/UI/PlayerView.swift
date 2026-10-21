@@ -177,14 +177,6 @@ struct PlayerView: View {
         }
     }
 
-    /// 当前这一集正在播的档位所带的降级说明（正常档位为空串）
-    private var playNote: String {
-        let list = availableOf[current.index] ?? []
-        let def = qualityOf[current.index]
-        if let t = list.first(where: { $0.definition == def && !$0.note.isEmpty }) { return t.note }
-        return list.first(where: { !$0.note.isEmpty })?.note ?? ""
-    }
-
     /// 档位来源标记：本机转码 / 公开明文源
     @ViewBuilder
     private func sourceBadge(for t: VideoTrack) -> some View {
@@ -309,6 +301,8 @@ private struct EpisodePage: View {
 
     @State private var player: AVPlayer?
     @State private var tracks: [VideoTrack] = []
+    /// 正在播的档位自带的降级说明（正常为空串）
+    @State private var playingNote: String = ""
     @State private var status = "准备中…"
     @State private var progress: Double = 0
     @State private var ready = false
@@ -409,9 +403,9 @@ private struct EpisodePage: View {
 
                 // 取流降级提示：官方接口没给出高清档位时，把原因常驻在画面上。
                 // 用户有权知道「为什么只有 360p」，而不是默默变糊。
-                if !playNote.isEmpty {
+                if !playingNote.isEmpty {
                     VStack {
-                        Text("⚠️ " + playNote)
+                        Text("⚠️ " + playingNote)
                             .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(.white)
                             .multilineTextAlignment(.center)
@@ -776,6 +770,7 @@ private struct ScrubBar: View {
                 status = "无可用清晰度"; failed = true; return
             }
             onQuality(best.definition)
+            playingNote = best.note
             // 接口给的尺寸：横屏片源靠它避开「被截一条铺满屏幕」
             videoSize = CGSize(width: best.width, height: best.height)
             let transcoding = PlayerAPI.needsTranscode(best)
