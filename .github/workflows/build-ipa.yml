@@ -32,6 +32,16 @@ jobs:
           set +e
           cd ShortDramaBox
           xcodegen generate > /tmp/test.log 2>&1
+          # xcodegen 2.46 写的是 objectVersion=77（Xcode 16 格式），
+          # 而 runner 上是 Xcode 15.4，读不了 —— 会和 make-ipa.sh 一样降到 56。
+          # 上一轮就是漏了这一步，报 "future Xcode project file format (77)"。
+          PBX="ShortDramaBox.xcodeproj/project.pbxproj"
+          if [ -f "$PBX" ] && grep -q "objectVersion = 77" "$PBX"; then
+            sed -i.bak 's/objectVersion = 77;/objectVersion = 56;/' "$PBX"
+            sed -i.bak '/preferredProjectObjectVersion = 77;/d' "$PBX"
+            rm -f "$PBX.bak"
+            echo "已把工程格式 77 -> 56"
+          fi
           # 用 UDID 选设备最稳：各 runner 上机型名字不完全一样
           UDID=$(xcrun simctl list devices available \
             | grep -E '^[[:space:]]+iPhone' \
