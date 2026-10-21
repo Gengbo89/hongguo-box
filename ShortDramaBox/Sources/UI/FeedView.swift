@@ -13,17 +13,6 @@ struct FeedItem: Identifiable {
         case failed(String)
     }
 
-    /// 进度回调能不能盖住当前状态。
-    ///
-    /// `.ready` / `.failed` 是终态，不能被后到的进度冲掉；`.pending` 也不行 ——
-    /// 它表示「已被 pause() 收回、等着重来」，此刻还在飞的下载回调一旦写进
-    /// `.downloading`，条目就会永远停在「解密中 100%」（prepareOne 又不会再碰它）。
-    var acceptsProgress: Bool {
-        switch self {
-        case .resolving, .downloading: return true
-        case .pending, .ready, .failed: return false
-        }
-    }
     var series: Series
     var episode: Episode?
     /// 解析时顺手存下的全集列表，点画面时直接起播，不用再请求一次
@@ -187,12 +176,13 @@ enum VideoFit {
 // MARK: - 推荐流数据
 
 @MainActor
-/// 所有状态一律在主线程上改。
+/// 推荐流数据。
 ///
-/// 这个类原先没有 @MainActor：resolve 在后台线程上直接写 @Published items，
-/// 而进度回调又特意 `Task { @MainActor }` 跳到主线程 —— 两条路各写各的，
-/// 最终那次 `.ready` 到底有没有落到 UI 上全看运气，表现就是卡在「解密中 100%」。
-@MainActor
+/// 卡在「解密中 100%」的成因不是线程问题（这个类一直是 @MainActor），而是两处：
+/// 进度回调是 `Task { @MainActor }` 排队过来的，可能晚于最终状态落地，把已经写好的
+/// `.ready`（或 pause() 刚收回的 `.pending`）又盖回 `.downloading`；而被取消的
+/// resolve 什么都不写、prepareOne 又不再重试 `.downloading` —— 一次丢失的回写
+/// 就成了永久卡死，文件其实早已下好，所以点进详情页反而能播。
 final class FeedModel: ObservableObject {
     @Published private(set) var items: [FeedItem] = []
     @Published private(set) var loading = true
@@ -296,10 +286,11 @@ final class FeedModel: ObservableObject {
     /// （回调被取消或丢掉）就必须重来 —— 否则一次丢失的回写会让这一页永远卡在
     /// 「解密中 100%」，怎么划回来都不会自己恢复。
     nonisolated static func shouldStart(status: FeedItem.Status, inFlight: Bool) -> Bool {
+        // 有任务在飞就一律等它：重复起任务会对同一部剧下两路，还会搅乱 inFlight 跟踪。
+        if inFlight { return false }
         switch status {
         case .ready: return false
-        case .resolving, .downloading: return !inFlight
-        case .pending, .failed: return true
+        case .resolving, .downloading, .pending, .failed: return true
         }
     }
 
@@ -393,9 +384,20 @@ final class FeedModel: ObservableObject {
         items.indices.contains(i) && items[i].series.id == seriesID
     }
 
+    /// 进度回调能不能盖住这个状态（抽成静态函数，便于单测把规则锁死）。
+    ///
+    /// `.ready` / `.failed` 是终态，不能被后到的进度冲掉；`.pending` 也不行 ——
+    /// 它表示「已被 pause() 收回、等着重来」，此刻还在飞的下载回调一旦写进
+    /// `.downloading`，条目就会永远停在「解密中 100%」（prepareOne 又不会再碰它）。
+    nonisolated static func acceptsProgress(_ s: FeedItem.Status) -> Bool {
+        switch s {
+        case .resolving, .downloading: return true
+        case .pending, .ready, .failed: return false
+        }
+    }
     /// 进度回写：只有还是同一部剧、且当前确实在「解析中 / 下载中」才接受。
     private func setProgress(_ i: Int, seriesID: String, _ p: Double) {
-        guard isCurrent(i, seriesID), items[i].status.acceptsProgress else { return }
+        guard isCurrent(i, seriesID), Self.acceptsProgress(items[i].status) else { return }
         items[i].status = .downloading(min(max(p, 0), 1))
     }
 

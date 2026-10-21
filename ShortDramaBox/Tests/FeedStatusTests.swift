@@ -19,21 +19,21 @@ final class FeedStatusTests: XCTestCase {
     // MARK: 进度回调不许覆盖终态
 
     func testProgressCannotClobberReady() {
-        XCTAssertFalse(FeedItem.Status.ready(sample).acceptsProgress)
+        XCTAssertFalse(FeedModel.acceptsProgress(.ready(sample)))
     }
 
     func testProgressCannotClobberFailed() {
-        XCTAssertFalse(FeedItem.Status.failed("加载失败").acceptsProgress)
+        XCTAssertFalse(FeedModel.acceptsProgress(.failed("加载失败")))
     }
 
     func testProgressCannotRevivePausedItem() {
         // pause() 已把条目收回 .pending，还在飞的下载回调不许把它改回 .downloading
-        XCTAssertFalse(FeedItem.Status.pending.acceptsProgress)
+        XCTAssertFalse(FeedModel.acceptsProgress(.pending))
     }
 
     func testProgressAcceptedOnlyWhileResolvingOrDownloading() {
-        XCTAssertTrue(FeedItem.Status.resolving.acceptsProgress)
-        XCTAssertTrue(FeedItem.Status.downloading(0.42).acceptsProgress)
+        XCTAssertTrue(FeedModel.acceptsProgress(.resolving))
+        XCTAssertTrue(FeedModel.acceptsProgress(.downloading(0.42)))
     }
 
     // MARK: 卡住的条目必须能自愈
@@ -57,5 +57,12 @@ final class FeedStatusTests: XCTestCase {
     func testPendingAndFailedRetry() {
         XCTAssertTrue(FeedModel.shouldStart(status: .pending, inFlight: false))
         XCTAssertTrue(FeedModel.shouldStart(status: .failed("加载失败"), inFlight: false))
+    }
+
+    func testLiveTaskBlocksEveryStatus() {
+        // 有任务在飞就一律等它，哪怕状态看起来该重试：重复起任务会下两路，
+        // 而且旧任务的 defer 会把新任务的 inFlight/tasks 记录一起抹掉。
+        XCTAssertFalse(FeedModel.shouldStart(status: .pending, inFlight: true))
+        XCTAssertFalse(FeedModel.shouldStart(status: .failed("加载失败"), inFlight: true))
     }
 }
