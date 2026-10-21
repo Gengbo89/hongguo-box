@@ -229,7 +229,19 @@ private struct EpisodePage: View {
     @State private var boosting = false
 
     /// 长按快进的倍速
-    private static let boostRate: Float = 2.0
+    private static let boostRate: Float = 1.5
+
+    /// 盯 AVPlayerItem 的失败（解码器报错 / 播到一半中断）
+    @State private var itemObs: NSKeyValueObservation?
+    @State private var failObs: NSObjectProtocol?
+    /// 本地文件不需要缓冲，迟迟不出画面就是坏了
+    @State private var watchdog: Task<Void, Never>?
+    /// 这一集已经自动重试过一次；再失败就摆按钮让用户点
+    @State private var autoRetried = false
+    @State private var retrying = false
+    /// 本页上次播到的位置。滑走时 onDisappear 会把播放器拆掉，
+    /// 靠它回来才能接上，而不是退回几秒或者从头开始。
+    @State private var lastPosition: Double = 0
 
     var body: some View {
         ZStack {
@@ -244,7 +256,7 @@ private struct EpisodePage: View {
                                     videoSize: videoSize)
                 }
 
-                // 手势层：短按暂停/继续，长按住 2x 快进、松手恢复。
+                // 手势层：短按暂停/继续，长按住 1.5x 加速、松手恢复原倍速。
                 // 用 onLongPressGesture 而不是 DragGesture(minimumDistance:0)：
                 // 后者套在分页 ScrollView 里容易和翻页抢手势，
                 // maximumDistance 让手指挪超过 30 点就直接交给翻页。
@@ -252,10 +264,13 @@ private struct EpisodePage: View {
                     .contentShape(Rectangle())
                     .onTapGesture { togglePlay() }
                     .onLongPressGesture(
-                        minimumDuration: 0.35, maximumDistance: 30,
+                        minimumDuration: 0.25, maximumDistance: 30,
                         perform: {
-                            // 已经暂停就不进快进，免得一按反而播起来
-                            guard let p = player, p.timeControlStatus == .playing else { return }
+                            // 用自己记的暂停状态判断，不看 timeControlStatus：
+                            // 缓冲、seek 的时候它不是 .playing，长按就会没反应
+                            // ——之前「长按不好用」就是这个原因。
+                            // 已经暂停时不进快进，免得一按反而播起来。
+                            guard let p = player, !paused else { return }
                             boosting = true
                             p.rate = Self.boostRate
                         },
@@ -276,7 +291,7 @@ private struct EpisodePage: View {
                 }
                 if boosting {
                     VStack {
-                        Text(String(format: "%gx 快进中", Self.boostRate))
+                        Text(String(format: "%gx 加速中", Self.boostRate))
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 11).padding(.vertical, 5)
@@ -292,7 +307,22 @@ private struct EpisodePage: View {
                     if failed {
                         Image(systemName: "exclamationmark.triangle")
                             .font(.system(size: 30)).foregroundStyle(.orange)
-                        Text(status).font(.footnote).foregroundStyle(.white.opacity(0.85))
+                        Text(status)
+                            .font(.footnote).foregroundStyle(.white.opacity(0.85))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 32)
+                        // 兜底：不用退回选集页再点进来，这里直接丢掉缓存重下这一集
+                        Button {
+                            Task { await reload() }
+                        } label: {
+                            Label(retrying ? "正在重新加载…" : "重新加载",
+                                  systemImage: "arrow.clockwise")
+                                .font(.system(size: 14, weight: .semibold))
+                                .padding(.horizontal, 16).padding(.vertical, 9)
+                                .background(.white.opacity(0.14))
+                                .clipShape(Capsule())
+                        }
+                        .disabled(retrying)
                         Text("上下滑动换一集").font(.caption2).foregroundStyle(.white.opacity(0.5))
                     } else {
                         ProgressView(value: progress).tint(.pink).frame(width: 220)
@@ -311,6 +341,74 @@ private struct EpisodePage: View {
         }
         .onAppear { if isActive { Task { await start() } } }
         .onDisappear { cleanup() }
+    }
+
+    /// 盯住这一集的 AVPlayerItem
+    private func watchItem(_ p: AVPlayer) {
+        stopWatching()
+        guard let item = p.currentItem else { return }
+        itemObs = item.observe(\.status, options: [.initial, .new]) { it, _ in
+            guard it.status == .failed else { return }
+            let why = it.error?.localizedDescription ?? "解码失败"
+            Task { @MainActor in playbackFailed(why) }
+        }
+        failObs = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main) { n in
+                let e = n.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+                Task { @MainActor in playbackFailed(e?.localizedDescription ?? "播放中断") }
+            }
+        // 本地文件不用缓冲：12 秒还不出画面就是这一集有问题
+        watchdog = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 12_000_000_000)
+            guard !Task.isCancelled, ready, !paused, let pl = player else { return }
+            // 已经出过画面、或者正在播，就不算卡住（CMTime 不能直接和 0 比）
+            let secs = pl.currentTime().seconds
+            let produced = secs.isFinite && secs > 0
+            guard !produced, pl.timeControlStatus != .playing else { return }
+            playbackFailed("一直没有画面")
+        }
+    }
+
+    private func stopWatching() {
+        itemObs?.invalidate(); itemObs = nil
+        if let o = failObs { NotificationCenter.default.removeObserver(o); failObs = nil }
+        watchdog?.cancel(); watchdog = nil
+    }
+
+    /// 这一集播不出来。先自动丢缓存重下一次；再不行才摆出「重新加载」让用户点。
+    /// 以前这里什么都不做：坏文件会一直被 existing() 当成缓存命中，
+    /// 这一集就永远是坏的，只能退出去重进。
+    private func playbackFailed(_ why: String) {
+        guard !retrying else { return }
+        stopWatching()
+        player?.pause()
+        player = nil
+        ready = false
+        if !autoRetried {
+            autoRetried = true
+            status = "这一集解码失败，正在重新加载…（\(why)）"
+            Task { await reload() }
+        } else {
+            failed = true
+            status = "这一集加载不出来：\(why)"
+        }
+    }
+
+    /// 丢掉这一集的成品缓存（含转码结果）再整条重来
+    private func reload() async {
+        guard !retrying else { return }
+        retrying = true
+        defer { retrying = false }
+        for t in tracks {
+            MediaStore.invalidate(vid: episode.vid, definition: t.definition)
+            if let r = MediaStore.rendition(for: t) {
+                Transcoder.invalidate(
+                    source: MediaStore.cachedPath(vid: episode.vid,
+                                                  definition: t.definition),
+                    rendition: r)
+            }
+        }
+        await start(force: true)
     }
 
     private func togglePlay() {
@@ -337,6 +435,12 @@ private struct EpisodePage: View {
     }
 
     private func cleanup() {
+        // 拆播放器之前记住播到哪了，滑回来接着放
+        if let p = player {
+            let sec = p.currentTime().seconds
+            if sec.isFinite, sec > 0 { lastPosition = sec }
+        }
+        stopWatching()
         boosting = false; paused = false
         if let o = timeObs { player?.removeTimeObserver(o); timeObs = nil }
         if let o = endObs { NotificationCenter.default.removeObserver(o); endObs = nil }
@@ -357,8 +461,19 @@ private struct EpisodePage: View {
     }
 
     private func start(force: Bool = false) async {
-        if started && !force { applySpeed(speed); player?.play(); paused = false; return }
+        // 播放器还在：直接续上。
+        //
+        // 这里原来只判断 `started`，但 cleanup()（onDisappear）会把 player 置空。
+        // 滑走再滑回来、或者自动下一集后往回滑，started 仍是 true，
+        // 于是这里直接 return —— 播放器再也没被建出来，画面永远是「准备中」。
+        // 现象就是「某一集解码不出来，退回选集页重进才好」。
+        if started && !force, let p = player {
+            applySpeed(speed)
+            if !paused { p.play() }
+            return
+        }
         started = true
+        autoRetried = false
         failed = false
         ready = false; progress = 0; status = "获取播放地址…"
         if let o = timeObs { player?.removeTimeObserver(o); timeObs = nil }
@@ -394,10 +509,17 @@ private struct EpisodePage: View {
             let p = AVPlayer(url: url)
             p.defaultRate = speed
             player = p
+            // 一建好就盯上：解码器报错、播到一半中断、迟迟不出画面，
+            // 都要能自己爬起来，而不是留一块黑屏让人退出去重进
+            watchItem(p)
 
-            // 续播
-            let at = WatchStore.shared.progress(seriesId: series.id)
-                .flatMap { $0.episode == episode.index ? $0.seconds : nil } ?? 0
+            // 续播：本页上次的位置优先（滑走再回来接得上），
+            // 其次是观看记录（退出去重进接得上）
+            var at = lastPosition
+            if at <= 3 {
+                at = WatchStore.shared.progress(seriesId: series.id)
+                    .flatMap { $0.episode == episode.index ? $0.seconds : nil } ?? 0
+            }
             if at > 3 {
                 await p.seek(to: CMTime(seconds: at, preferredTimescale: 600))
             }

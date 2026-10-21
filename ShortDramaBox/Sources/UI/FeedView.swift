@@ -309,14 +309,12 @@ final class FeedModel: ObservableObject {
         }
         if items[i].series.episodeCount == 0 { items[i].series.episodeCount = full.episodeCount }
 
-        // 优先从上次看到的那集接着播（记录里有就续播，否则随机）
-        let ep: Episode
-        if let h = WatchStore.shared.progress(seriesId: series.id),
-           let match = eps.first(where: { $0.index == h.episode }) {
-            ep = match
-        } else {
-            ep = eps.randomElement() ?? eps[0]
-        }
+        // 固定从第 1 集开始。
+        //
+        // 这里以前是「有记录就接着上次那集，没有就随机一集」。推荐流是刷到就
+        // 顺眼看一眼的场景，一进来就是第 47 集、还是从半截开始，前情全断了，
+        // 接着看反而更割裂。想续看走「历史」页，或者在播放页里选集。
+        let ep = eps.first { $0.index == 1 } ?? eps[0]
         items[i].episode = ep
         items[i].episodes = eps
 
@@ -608,15 +606,11 @@ struct FeedView: View {
             NavigationStack { DetailView(series: it.series) }
         }
         // 点画面直接接着进度播，不再绕一层详情页
-        .fullScreenCover(item: $play, onDismiss: {
-            let i = index
-            guard model.items.indices.contains(i) else { return }
-            let it = model.items[i]
-            if let now = WatchStore.shared.progress(seriesId: it.series.id)?.episode,
-               now != it.episode?.index {
-                model.refresh(i)   // 只有换了集才重解析，免得白闪一下
-            }
-        }) { t in
+        // 关掉播放页后这一页自己会续上：onDisappear 把播放器拆了，
+        // 回来 onAppear + isActive 会重新 start()。
+        // 原来这里还在 onDismiss 里按观看记录重解析 —— 推荐页现在固定在
+        // 第 1 集、不跟随记录，那个分支已经没有意义了。
+        .fullScreenCover(item: $play) { t in
             PlayerView(series: t.series, episodes: t.episodes, start: t.start)
         }
     }
@@ -638,9 +632,10 @@ struct FeedView: View {
         }
     }
 
-    /// 有观看记录就从记录那集开始，否则用这一页已经解析出的那集
+    /// 推荐页进来的固定从第 1 集起（和上面卡片里播的是同一集，不会对不上）。
+    /// 续看走「历史」页。
     private func resumeEpisode(_ it: FeedItem) -> Episode {
-        let want = WatchStore.shared.progress(seriesId: it.series.id)?.episode ?? it.episode?.index ?? 1
+        let want = it.episode?.index ?? 1
         return it.episodes.first { $0.index == want } ?? it.episodes[0]
     }
 

@@ -70,15 +70,28 @@ enum Transcoder {
             .appendingPathComponent("\(stem).\(rendition.rawValue).mp4")
     }
 
-    /// 已转好且非空则返回缓存路径。
+    /// 已转好、非空、而且盒子链完整才返回缓存路径。
     /// 命中时刷新访问时间 —— 转码结果重建代价高，让它排在 LRU 淘汰的后面。
+    ///
+    /// 只判断「非空」不够：AVAssetWriter 把 moov 写在文件末尾，
+    /// 转到一半被杀就留下一个没有 moov 的残缺 mp4。它会被永久当成命中，
+    /// 于是这一集每次都「解码不出来」，重进多少次都一样。
     static func cached(for source: URL, rendition: Rendition) -> URL? {
         let url = outputURL(for: source, rendition: rendition)
         guard let a = try? FileManager.default.attributesOfItem(atPath: url.path),
               let n = a[.size] as? NSNumber, n.intValue > 0 else { return nil }
+        guard MediaStore.looksPlayable(url) else {
+            try? FileManager.default.removeItem(at: url)
+            return nil
+        }
         try? FileManager.default.setAttributes([.modificationDate: Date()],
                                               ofItemAtPath: url.path)
         return url
+    }
+
+    /// 丢掉某个源文件对应的转码结果（播放页「重新加载」用）
+    static func invalidate(source: URL, rendition: Rendition) {
+        try? FileManager.default.removeItem(at: outputURL(for: source, rendition: rendition))
     }
 
     /// 把 source 降分辨率重编码成 rendition，返回缓存后的本地文件名。
@@ -226,8 +239,12 @@ enum Transcoder {
             try? FileManager.default.removeItem(at: partial)
             throw TranscoderError.noMediaProduced
         }
-        try? FileManager.default.removeItem(at: destination)
-        try FileManager.default.moveItem(at: partial, to: destination)
+        // 换名前再验一次盒子链：残缺文件绝不放到成品路径上
+        guard MediaStore.looksPlayable(partial) else {
+            try? FileManager.default.removeItem(at: partial)
+            throw TranscoderError.noMediaProduced
+        }
+        try MediaStore.install(partial, at: destination)
         progress?(1.0)
         return destination
     }

@@ -100,6 +100,14 @@ enum MediaStore {
     static func cachedPath(vid: String, definition: String) -> URL {
         dir.appendingPathComponent("\(vid)_\(definition).mp4")
     }
+    /// 下载/解密的半成品一律放这个子目录。
+    /// 原来半成品直接叫 dl_xxx.mp4 躺在缓存目录里：一是被 pruneIfNeeded
+    /// 当成成品按 LRU 删掉（下载中途文件没了），二是和成品混在一起不好排查。
+    static var tmpDir: URL {
+        let d = dir.appendingPathComponent("tmp", isDirectory: true)
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
 
     /// 缓存上限 1.5GB，超出时按最后访问时间淘汰最旧的
     static var limitBytes: Int64 = 1_500 * 1024 * 1024
@@ -118,17 +126,88 @@ enum MediaStore {
             total += size
         }
         guard total > limitBytes else { return }
-        for (u, _, sz) in entries.sorted(by: { $0.1 < $1.1 }) {
+        // 10 分钟内碰过的一律不动 —— 里面可能有正在播的那一集。
+        // 把正在播的文件删掉，表现就是「看着看着突然解码不出来」。
+        let cutoff = Date().addingTimeInterval(-600)
+        for (u, date, sz) in entries.sorted(by: { $0.1 < $1.1 }) {
+            guard date < cutoff else { continue }
             try? fm.removeItem(at: u)
             total -= sz
             if total <= limitBytes { break }
         }
     }
 
-    /// 已有缓存则直接返回
+    /// 已有缓存且完整才返回。
+    ///
+    /// 只判断「文件在不在」是不够的：写到一半被杀、并发读到半成品、
+    /// 磁盘写满，都会留下一个存在但残缺的 mp4。交给 AVPlayer 就是
+    /// 「某一集解码不出来」，而且它一直被当成缓存命中 —— 重进多少次都还是坏的。
+    /// 发现不完整就直接删掉重下。
     static func existing(vid: String, definition: String) -> URL? {
         let u = cachedPath(vid: vid, definition: definition)
-        return FileManager.default.fileExists(atPath: u.path) ? u : nil
+        guard FileManager.default.fileExists(atPath: u.path) else { return nil }
+        guard looksPlayable(u) else {
+            try? FileManager.default.removeItem(at: u)
+            return nil
+        }
+        return u
+    }
+
+    /// 丢掉这一档的成品缓存（播放页「重新加载」用）。
+    /// 光重试是没用的：existing() 会把同一个坏文件再交回来。
+    static func invalidate(vid: String, definition: String) {
+        try? FileManager.default.removeItem(at: cachedPath(vid: vid, definition: definition))
+    }
+
+    /// 顺着顶层盒子链走一遍，判断这个 mp4 是不是完整的。
+    ///
+    /// 只读盒头（每个盒子一次 seek），几十 MB 也就几十次读，开销可以忽略。
+    /// 判据：盒子链能走通、看过 moov、见过媒体数据，且没有一个盒子
+    /// 声称的长度超出文件末尾 —— 截断一定会在这条上暴露。
+    /// 末尾的多余字节不算错（有些源站会补零），所以不要求正好走到 EOF。
+    static func looksPlayable(_ u: URL) -> Bool {
+        guard let fh = try? FileHandle(forReadingFrom: u) else { return false }
+        defer { try? fh.close() }
+        guard let total = try? fh.seekToEnd(), total >= 16 else { return false }
+        var off: UInt64 = 0
+        var sawMoov = false, sawMedia = false
+        while off + 8 <= total {
+            try? fh.seek(toOffset: off)
+            guard let hdr = try? fh.read(upToCount: 16), hdr.count >= 8 else { break }
+            let b = [UInt8](hdr)
+            func be32(_ i: Int) -> UInt64 {
+                (UInt64(b[i]) << 24) | (UInt64(b[i+1]) << 16) | (UInt64(b[i+2]) << 8) | UInt64(b[i+3])
+            }
+            var size = be32(0)
+            let type = String(bytes: b[4..<8], encoding: .ascii) ?? "????"
+            if size == 1 {
+                guard b.count >= 16 else { return false }
+                var v: UInt64 = 0
+                for i in 8..<16 { v = (v << 8) | UInt64(b[i]) }
+                size = v
+            } else if size == 0 {
+                size = total - off
+            }
+            // 盒头都读不出长度：当成尾部填充，前面拿到的结论仍然有效
+            guard size >= 8 else { break }
+            // 声称的长度超出文件末尾 = 截断，这个必须判死
+            guard off + size <= total else { return false }
+            if type == "moov" { sawMoov = true }
+            if type == "mdat" || type == "moof" { sawMedia = true }
+            off += size
+        }
+        return sawMoov && sawMedia
+    }
+
+    /// 半成品原子换名到最终路径：让成品路径上永远只有完整文件。
+    /// 直接往成品路径写的话，并发读到的就是半截文件。
+    static func install(_ tmp: URL, at dest: URL) throws {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: dest.path) {
+            _ = try fm.replaceItemAt(dest, withItemAt: tmp)
+        } else {
+            try fm.moveItem(at: tmp, to: dest)
+        }
     }
 
     @discardableResult
@@ -156,8 +235,7 @@ enum MediaStore {
         // 公开备用源是明文，直接落盘，跳过解密与去 CENC
         if track.spadeA.isEmpty {
             let plain = cachedPath(vid: vid, definition: track.definition)
-            try? FileManager.default.removeItem(at: plain)
-            try FileManager.default.moveItem(at: staged, to: plain)
+            try install(staged, at: plain)
             pruneIfNeeded()
             progress(1.0)
             return plain
@@ -171,7 +249,18 @@ enum MediaStore {
         guard let v = stats["vide"], v.0 > 0 else { throw ApiError.noData }
         progress(0.97)
         let out = cachedPath(vid: vid, definition: track.definition)
-        _ = stripCENC(dec.path, outPath: out.path)
+        // 先写到 .part，校验通过再原子换名。
+        // 原来是 `_ = stripCENC(dec.path, outPath: out.path)`：直接写成品路径，
+        // 返回值（-1 = 失败）被丢掉 —— strip 失败也照样返回「成功」，
+        // 于是把一个残缺文件交给 AVPlayer，就是那一集「解码不出来」。
+        let part = out.appendingPathExtension("part")
+        try? FileManager.default.removeItem(at: part)
+        let delta = stripCENC(dec.path, outPath: part.path)
+        guard delta != -1, looksPlayable(part) else {
+            try? FileManager.default.removeItem(at: part)
+            throw ApiError.noData
+        }
+        try install(part, at: out)
         pruneIfNeeded()
         progress(1.0)
         return out
@@ -183,7 +272,7 @@ enum MediaStore {
         var r = URLRequest(url: url)
         r.timeoutInterval = 120
         r.setValue(BROWSER_UA, forHTTPHeaderField: "User-Agent")
-        let staged = dir.appendingPathComponent("dl_\(UUID().uuidString).mp4")
+        let staged = tmpDir.appendingPathComponent("dl_\(UUID().uuidString).mp4")
         let d = FileDownloader(expected: expect, dest: staged, onProgress: progress)
         let out = try await d.run(r)
         let attrs = try? FileManager.default.attributesOfItem(atPath: out.path)
