@@ -207,6 +207,85 @@ private final class BoostBox {
     var base: Float = 1.0
 }
 
+#if os(iOS)
+/// 播放区手势层（UIKit 实现）。
+///
+/// 为什么不用 SwiftUI 的 onLongPressGesture：LongPressGesture 是
+/// 「按住到 minimumDuration 就算完成」的**离散**手势，一旦完成，
+/// 松手时不会再回调 onPressingChanged(false)。实测表现就是
+/// 长按加速生效、松手却回不到 1x，要再摸一下屏幕才恢复。
+/// UILongPressGestureRecognizer 的 .began / .ended / .cancelled
+/// 才精确对应「按下」和「抬起」，被打断（来电、切后台）也能收到。
+///
+/// 不抢分页滚动：cancelsTouchesInView = false 且允许与其它手势同时识别；
+/// 手指在 0.25 秒内移动超过 30 点时长按直接失败，翻页照常。
+struct PlayerGestureLayer: UIViewRepresentable {
+    var onTap: () -> Void
+    var onHoldStart: () -> Void
+    var onHoldEnd: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> UIView {
+        let v = UIView()
+        v.backgroundColor = .clear
+        v.isUserInteractionEnabled = true
+
+        let hold = UILongPressGestureRecognizer(
+            target: context.coordinator, action: #selector(Coordinator.hold(_:)))
+        hold.minimumPressDuration = 0.25
+        hold.allowableMovement = 30
+        hold.cancelsTouchesInView = false
+        hold.delegate = context.coordinator
+        v.addGestureRecognizer(hold)
+
+        let tap = UITapGestureRecognizer(
+            target: context.coordinator, action: #selector(Coordinator.tap(_:)))
+        tap.delegate = context.coordinator
+        // 长按成立时不要再补一次「暂停」
+        tap.require(toFail: hold)
+        v.addGestureRecognizer(tap)
+        return v
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        // body 每次重算闭包都会变，跟着刷新，免得回调打到旧状态上
+        context.coordinator.parent = self
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var parent: PlayerGestureLayer
+        init(_ p: PlayerGestureLayer) { parent = p }
+
+        @objc func hold(_ g: UILongPressGestureRecognizer) {
+            switch g.state {
+            case .began: parent.onHoldStart()
+            case .ended, .cancelled, .failed: parent.onHoldEnd()
+            default: break
+            }
+        }
+
+        @objc func tap(_ g: UITapGestureRecognizer) {
+            guard g.state == .ended else { return }
+            parent.onTap()
+        }
+
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
+        }
+    }
+}
+#else
+/// 本机（macOS）typecheck 用的空壳；真机走上面的 UIKit 版本。
+struct PlayerGestureLayer: View {
+    var onTap: () -> Void
+    var onHoldStart: () -> Void
+    var onHoldEnd: () -> Void
+    var body: some View { Color.clear }
+}
+#endif
+
 private struct EpisodePage: View {
     let series: Series
     let episode: Episode
@@ -223,6 +302,18 @@ private struct EpisodePage: View {
     @State private var progress: Double = 0
     @State private var ready = false
     @State private var timeObs: Any?
+    /// 进度条专用的时间观察（0.3 秒一次；上面那个 5 秒的只管写观看记录）
+    @State private var scrubObs: Any?
+    /// 当前播放位置（秒）
+    @State private var position: Double = 0
+    /// 这一集总时长（秒），0 表示还不知道
+    @State private var duration: Double = 0
+    /// 正在拖进度条
+    @State private var scrubbing = false
+    /// 拖进度条时滑块的落点
+    @State private var scrubTarget: Double = 0
+    /// 开始拖动前是不是在播，松手后要接着播
+    @State private var wasPlaying = false
     @State private var endObs: NSObjectProtocol?
     @State private var started = false
     @State private var failed = false
@@ -269,17 +360,12 @@ private struct EpisodePage: View {
                 // 用 onLongPressGesture 而不是 DragGesture(minimumDistance:0)：
                 // 后者套在分页 ScrollView 里容易和翻页抢手势，
                 // maximumDistance 让手指挪超过 30 点就直接交给翻页。
-                Color.clear
-                    .contentShape(Rectangle())
-                    .onTapGesture { togglePlay() }
-                    .onLongPressGesture(
-                        minimumDuration: 0.25, maximumDistance: 30,
-                        perform: { beginBoost() },
-                        onPressingChanged: { _ in
-                            // 松手恢复原速；下一次按下也顺手恢复一次，
-                            // 万一某次手势被打断没收到底，下一次触摸能补回来。
-                            endBoost()
-                        })
+                PlayerGestureLayer(
+                    onTap: { togglePlay() },
+                    onHoldStart: { beginBoost() },
+                    onHoldEnd: { endBoost() }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 // 注意：下面两块**不能**写成 if paused { } / if boosting { }。
                 // 条件插入/移除子视图会让 SwiftUI 重建这个手势，
@@ -305,6 +391,42 @@ private struct EpisodePage: View {
                 }
                 .allowsHitTesting(false)
                 .opacity(boosting ? 1 : 0)
+
+                // 进度条：单集内可以随便拖。想看最后几秒直接拖过去，
+                // 不用从头等到尾。拖动时先暂停，松手再定位并接着播。
+                VStack {
+                    Spacer()
+                    HStack(spacing: 10) {
+                        Text(Self.clock(scrubbing ? scrubTarget : position))
+                            .font(.system(size: 11, weight: .medium).monospacedDigit())
+                            .foregroundStyle(.white)
+                            .frame(width: 46, alignment: .trailing)
+                        Slider(value: $scrubTarget, in: 0...max(duration, 1)) { editing in
+                            if editing {
+                                scrubbing = true
+                                wasPlaying = (player?.rate ?? 0) > 0
+                                player?.pause()
+                            } else {
+                                let t = CMTime(seconds: scrubTarget, preferredTimescale: 600)
+                                player?.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
+                                position = scrubTarget
+                                scrubbing = false
+                                if wasPlaying {
+                                    player?.play()
+                                    player?.rate = boosting ? Self.boostRate : speed
+                                }
+                            }
+                        }
+                        .tint(.pink)
+                        .disabled(duration <= 0)
+                        Text(Self.clock(duration))
+                            .font(.system(size: 11, weight: .medium).monospacedDigit())
+                            .foregroundStyle(.white.opacity(0.8))
+                            .frame(width: 46, alignment: .leading)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 8)
+                }
             } else {
                 VStack(spacing: 14) {
                     if failed {
@@ -458,6 +580,15 @@ private struct EpisodePage: View {
         player?.rate = boost.base
     }
 
+    /// 秒 → mm:ss（超过一小时用 h:mm:ss）
+    private static func clock(_ s: Double) -> String {
+        guard s.isFinite, s >= 0 else { return "00:00" }
+        let t = Int(s.rounded())
+        let h = t / 3600, m = (t % 3600) / 60, sec = t % 60
+        if h > 0 { return String(format: "%d:%02d:%02d", h, m, sec) }
+        return String(format: "%02d:%02d", m, sec)
+    }
+
     private func applySpeed(_ s: Float) {
         player?.defaultRate = s
         if player?.timeControlStatus == .playing { player?.rate = s }
@@ -474,6 +605,7 @@ private struct EpisodePage: View {
         endBoost()
         boosting = false; paused = false
         if let o = timeObs { player?.removeTimeObserver(o); timeObs = nil }
+        if let o = scrubObs { player?.removeTimeObserver(o); scrubObs = nil }
         if let o = endObs { NotificationCenter.default.removeObserver(o); endObs = nil }
         player?.pause(); player = nil
     }
@@ -507,7 +639,9 @@ private struct EpisodePage: View {
         autoRetried = false
         failed = false
         ready = false; progress = 0; status = "获取播放地址…"
+        duration = 0; position = 0; scrubTarget = 0; scrubbing = false
         if let o = timeObs { player?.removeTimeObserver(o); timeObs = nil }
+        if let o = scrubObs { player?.removeTimeObserver(o); scrubObs = nil }
         player?.pause(); player = nil
 
         do {
@@ -568,6 +702,21 @@ private struct EpisodePage: View {
                 guard sec.isFinite, sec > 0 else { return }
                 WatchStore.shared.record(seriesId: series.id, title: series.title,
                                          cover: series.cover, episode: episode.index, seconds: sec)
+            }
+
+            // 进度条：0.3 秒刷一次当前位置和总时长
+            if let o = scrubObs { p.removeTimeObserver(o); scrubObs = nil }
+            scrubObs = p.addPeriodicTimeObserver(
+                forInterval: CMTime(seconds: 0.3, preferredTimescale: 600), queue: .main) { t in
+                let sec = CMTimeGetSeconds(t)
+                let d = p.currentItem?.duration.seconds ?? 0
+                Task { @MainActor in
+                    if d.isFinite, d > 0 { duration = d }
+                    if !scrubbing, sec.isFinite {
+                        position = sec
+                        scrubTarget = sec
+                    }
+                }
             }
 
             // 播完自动下一集

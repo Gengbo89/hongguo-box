@@ -43,6 +43,10 @@ final class LocalIndex {
     private var tagPrefix: [Int32] = []
     private var titleBlobLen = 0
 
+    /// 标签 → 记录下标的倒排索引。首次用到才建（约 0.3~1 秒、约 7 MB），
+    /// 之后按标签翻库就是直接切片，不再全表扫描。
+    private var tagIndex: [[Int32]]?
+
     private var loadFailed = false
     private var loaded = false
     private let lock = NSLock()
@@ -204,6 +208,91 @@ final class LocalIndex {
             }
         }
         return out
+    }
+
+    // MARK: - 标签浏览
+
+    /// 一个标签及其剧集数
+    struct TagBucket {
+        var tag: String
+        var count: Int
+    }
+
+    /// 建倒排索引。两趟扫描：先数个数把容量开好（避免反复扩容），再灌。
+    /// 记录下标递增地扫，所以每个标签的列表天然升序。
+    private func buildTagIndex() -> [[Int32]] {
+        load()
+        lock.lock()
+        defer { lock.unlock() }
+        if let t = tagIndex { return t }
+        var lists: [[Int32]] = []
+        if let d = data, count > 0, !tagTable.isEmpty, tagPrefix.count > count {
+            lists = [[Int32]](repeating: [], count: tagTable.count)
+            var counts = [Int32](repeating: 0, count: tagTable.count)
+            d.withUnsafeBytes { raw in
+                for i in 0..<count {
+                    let n = Int(raw.loadUnaligned(fromByteOffset: tagCountsOff + i, as: UInt8.self))
+                    guard n > 0 else { continue }
+                    let base = Int(tagPrefix[i])
+                    for k in 0..<n {
+                        let off = tagRefsOff + (base + k) * 2
+                        guard off + 2 <= d.count else { break }
+                        let ti = Int(raw.loadUnaligned(fromByteOffset: off, as: UInt16.self))
+                        if ti >= 0 && ti < counts.count { counts[ti] += 1 }
+                    }
+                }
+            }
+            for i in 0..<lists.count { lists[i].reserveCapacity(Int(counts[i])) }
+            d.withUnsafeBytes { raw in
+                for i in 0..<count {
+                    let n = Int(raw.loadUnaligned(fromByteOffset: tagCountsOff + i, as: UInt8.self))
+                    guard n > 0 else { continue }
+                    let base = Int(tagPrefix[i])
+                    for k in 0..<n {
+                        let off = tagRefsOff + (base + k) * 2
+                        guard off + 2 <= d.count else { break }
+                        let ti = Int(raw.loadUnaligned(fromByteOffset: off, as: UInt16.self))
+                        if ti >= 0 && ti < lists.count { lists[ti].append(Int32(i)) }
+                    }
+                }
+            }
+        }
+        tagIndex = lists
+        return lists
+    }
+
+    /// 全部标签，按剧集数从多到少（分类页用）。空标签不返回。
+    func tagBuckets() -> [TagBucket] {
+        let lists = buildTagIndex()
+        var out: [TagBucket] = []
+        out.reserveCapacity(lists.count)
+        for (i, l) in lists.enumerated() where !l.isEmpty && i < tagTable.count {
+            out.append(TagBucket(tag: tagTable[i], count: l.count))
+        }
+        out.sort { $0.count > $1.count }
+        return out
+    }
+
+    func tagCount(_ tag: String) -> Int {
+        let lists = buildTagIndex()
+        guard let ti = tagTable.firstIndex(of: tag), ti < lists.count else { return 0 }
+        return lists[ti].count
+    }
+
+    /// 按标签翻库。offset/limit 分页，返回这一页和该标签的总数。
+    func series(tag: String, offset: Int = 0, limit: Int = 24) -> (items: [Series], total: Int) {
+        let lists = buildTagIndex()
+        guard let ti = tagTable.firstIndex(of: tag), ti < lists.count else { return ([], 0) }
+        let l = lists[ti]
+        let total = l.count
+        guard limit > 0, offset >= 0, offset < total else { return ([], total) }
+        let end = min(offset + limit, total)
+        var items: [Series] = []
+        items.reserveCapacity(end - offset)
+        for k in offset..<end {
+            if let one = series(at: Int(l[k])) { items.append(one) }
+        }
+        return (items, total)
     }
 
     // MARK: - 搜索

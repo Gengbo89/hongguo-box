@@ -168,24 +168,206 @@ struct ChannelGridView: View {
     }
 }
 
+/// 分类页 = **按标签翻库**。
+///
+/// 原来这里是「频道」（真人剧 / 漫剧 / AI剧），但那和首页那几行是同一批数据、
+/// 只是换个排版，等于没有分类价值。改成按标签浏览：内置索引里有全库
+/// 58.8 万部的标签（378 个），倒排一次之后按标签翻库就是直接切片。
 struct BrowseView: View {
-    @State private var slug = "real-drama"
+    @State private var buckets: [LocalIndex.TagBucket] = []
+    @State private var tag: String?
+    @State private var building = true
+    @State private var showAll = false
+
+    /// 顶部胶囊里先放最热的一批，剩下的进「全部标签」
+    private var hot: [LocalIndex.TagBucket] { Array(buckets.prefix(20)) }
 
     var body: some View {
         NavigationStack {
-            ChannelGridView(title: Catalog.categories.first { $0.slug == slug }?.name ?? "分类",
-                            slugs: [slug])
-                // 换频道就换一份新的分页状态，不要接着上一个频道的页码翻
-                .id(slug)
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Menu(Catalog.categories.first { $0.slug == slug }?.name ?? "分类") {
-                            ForEach(Catalog.categories, id: \.slug) { c in
-                                Button(c.name) { slug = c.slug }
-                            }
+            Group {
+                if building {
+                    ProgressView("正在整理标签…")
+                } else if buckets.isEmpty {
+                    CompatUnavailable("没有标签数据", systemImage: "tag.slash",
+                                       desc: "内置索引里没有读到标签")
+                } else {
+                    VStack(spacing: 0) {
+                        chips
+                        Divider()
+                        if let t = tag {
+                            // 换标签就换一份新的分页状态
+                            TagResultGrid(tag: t).id(t)
+                        } else {
+                            Spacer()
                         }
                     }
                 }
+            }
+            .navigationTitle("分类")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { showAll = true } label: {
+                        Label("全部标签", systemImage: "tag")
+                    }
+                    .disabled(buckets.isEmpty)
+                }
+            }
+            .sheet(isPresented: $showAll) {
+                AllTagsView(buckets: buckets, selected: $tag, dismissTo: $showAll)
+            }
+            .task {
+                guard buckets.isEmpty else { return }
+                let b = await Task.detached(priority: .userInitiated) {
+                    LocalIndex.shared.tagBuckets()
+                }.value
+                buckets = b
+                if tag == nil { tag = b.first?.tag }
+                building = false
+            }
         }
+    }
+
+    private var chips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(hot, id: \.tag) { b in
+                    Button { tag = b.tag } label: {
+                        Text(b.tag)
+                            .font(.system(size: 13, weight: tag == b.tag ? .semibold : .regular))
+                            .padding(.horizontal, 12).padding(.vertical, 6)
+                            .background(tag == b.tag ? Color.pink.opacity(0.85)
+                                                     : Color.white.opacity(0.12))
+                            .foregroundStyle(.white)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+                Button { showAll = true } label: {
+                    Text("更多 ›")
+                        .font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(Color.white.opacity(0.12))
+                        .foregroundStyle(.white)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 10)
+        }
+    }
+}
+
+/// 全部标签。378 个标签靠一个搜索框找。
+private struct AllTagsView: View {
+    let buckets: [LocalIndex.TagBucket]
+    @Binding var selected: String?
+    @Binding var dismissTo: Bool
+    @State private var q = ""
+
+    private var list: [LocalIndex.TagBucket] {
+        let k = q.trimmingCharacters(in: .whitespaces)
+        guard !k.isEmpty else { return buckets }
+        return buckets.filter { $0.tag.localizedCaseInsensitiveContains(k) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List(list, id: \.tag) { b in
+                Button {
+                    selected = b.tag
+                    dismissTo = false
+                } label: {
+                    HStack {
+                        Text(b.tag).foregroundStyle(.primary)
+                        if selected == b.tag {
+                            Image(systemName: "checkmark").foregroundStyle(.pink)
+                        }
+                        Spacer()
+                        Text("\(b.count) 部").font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .navigationTitle("全部标签（\(buckets.count)）")
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $q, prompt: "找标签")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("关闭") { dismissTo = false }
+                }
+            }
+        }
+    }
+}
+
+/// 某个标签下的剧集，滚到底自动续。
+private struct TagResultGrid: View {
+    let tag: String
+
+    @State private var items: [Series] = []
+    @State private var page = 0
+    @State private var total = 0
+    @State private var loading = false
+    @State private var finished = false
+
+    private let per = 24
+    private let columns = [GridItem(.adaptive(minimum: 110), spacing: 10)]
+
+    var body: some View {
+        ScrollView {
+            if total > 0 {
+                HStack {
+                    Text("「\(tag)」共 \(total) 部")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal).padding(.top, 10)
+            }
+
+            LazyVGrid(columns: columns, spacing: 14) {
+                ForEach(items) { s in
+                    NavigationLink { DetailView(series: s) } label: {
+                        PosterCard(series: s, width: 110)
+                    }
+                    .buttonStyle(.plain)
+                    .onAppear {
+                        if s.id == items.last?.id { Task { await more() } }
+                    }
+                }
+            }.padding()
+
+            Group {
+                if loading { ProgressView().padding(.bottom, 24) }
+                else if finished && !items.isEmpty {
+                    Text("没有更多了").font(.footnote)
+                        .foregroundStyle(.secondary).padding(.bottom, 24)
+                } else if items.isEmpty && finished {
+                    CompatUnavailable("暂无内容", systemImage: "tray",
+                                       desc: "这个标签下暂时没有可展示的剧集")
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .refreshable { reset(); await more() }
+        .task { await more() }
+    }
+
+    private func more() async {
+        guard !loading, !finished else { return }
+        loading = true
+        defer { loading = false }
+        let off = page * per
+        // 首次会建倒排索引（全库扫描），别挂在主线程上
+        let r = await Task.detached(priority: .userInitiated) {
+            LocalIndex.shared.series(tag: tag, offset: off, limit: per)
+        }.value
+        total = r.total
+        if r.items.isEmpty { finished = true } else {
+            items.append(contentsOf: r.items)
+            page += 1
+        }
+    }
+
+    private func reset() {
+        items = []; page = 0; total = 0; finished = false
     }
 }
