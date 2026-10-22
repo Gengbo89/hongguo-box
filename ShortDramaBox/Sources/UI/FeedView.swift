@@ -298,11 +298,12 @@ final class FeedModel: ObservableObject {
         }
 
         // 2) 新剧：把爆剧的缺额一起要过来
-        let wantNew = plan.new + (plan.hot - hotTake)
+        let newWant = plan.new + (plan.hot - hotTake)
+        let newOffset = newCursor
         var newGot = 0
-        if wantNew > 0 {
+        if newWant > 0 {
             let r = await Task.detached(operation: {
-                LocalIndex.shared.newest(offset: newCursor, limit: wantNew)
+                LocalIndex.shared.newest(offset: newOffset, limit: newWant)
             }).value
             newCursor = r.next
             picked += r.items
@@ -310,11 +311,11 @@ final class FeedModel: ObservableObject {
         }
 
         // 3) 其他剧：全库均匀随机，含新剧的缺额
-        let wantOther = plan.other + (wantNew - newGot)
-        if wantOther > 0 {
+        let otherWant = plan.other + (newWant - newGot)
+        if otherWant > 0 {
             let excl = seenIDs.union(picked.map(\.id))
             let more = await Task.detached(operation: {
-                LocalIndex.shared.randomSeries(limit: wantOther, excluding: excl)
+                LocalIndex.shared.randomSeries(limit: otherWant, excluding: excl)
             }).value
             picked += more
         }
