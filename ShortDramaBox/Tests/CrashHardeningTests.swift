@@ -167,74 +167,59 @@ final class CrashHardeningTests: XCTestCase {
                        "senc/saiz/saio 必须被摘掉")
     }
 
-    // MARK: - 5. 索引抽样：内存与库大小无关（推荐页原来会解全量 58 万条）
+    // MARK: - 5. 全库索引取样：推荐页不再解全量 58 万条，越界与极端参数都不能崩
 
-    /// 把测试数据写到抽样器真正读的那个路径，跑完还原
-    private func withIndexFile(_ body: () -> Void) {
-        let url = Catalog.indexCacheURL
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
-                                                 withIntermediateDirectories: true)
-        let backup = try? Data(contentsOf: url)
-        body()
-        if let backup { try? backup.write(to: url) }
-        else { try? FileManager.default.removeItem(at: url) }
+    /// 新剧按 created 倒序续抽：越界 offset 只能返回空，不能回绕或崩
+    func testNewestHandlesOutOfRangeOffsets() {
+        let total = LocalIndex.shared.totalCount
+        guard total > 0 else { return XCTFail("索引没加载，测试环境缺 index.bin.z") }
+        let far = LocalIndex.shared.newest(offset: total + 10_000, limit: 5)
+        XCTAssertTrue(far.items.isEmpty, "越界 offset 不该有结果")
+        XCTAssertEqual(far.next, total + 10_000, "越界时 next 应原样带回，不该回绕到 0")
+        let neg = LocalIndex.shared.newest(offset: -5, limit: 3)
+        XCTAssertFalse(neg.items.isEmpty, "负数 offset 应被夹到 0 后照常取")
     }
 
-    func testSampleIndexCacheReadsAllAndBoundsMemory() {
-        withIndexFile {
-            let all: [Series] = (0..<2000).map { Series(id: "s-\($0)", title: "标题\($0)") }
-            try? JSONEncoder().encode(all).write(to: Catalog.indexCacheURL)
-            guard let got = Catalog.sampleIndexCache(limit: 50) else {
-                return XCTFail("抽样失败")
+    /// 极端 limit：0 或负数直接空，超大 limit 也不能抽到重复
+    func testRandomSeriesHandlesExtremeLimits() {
+        guard LocalIndex.shared.totalCount > 0 else { return XCTFail("索引没加载") }
+        XCTAssertTrue(LocalIndex.shared.randomSeries(limit: 0).isEmpty, "limit 0 应为空")
+        XCTAssertTrue(LocalIndex.shared.randomSeries(limit: -3).isEmpty, "负数 limit 应为空")
+        let big = LocalIndex.shared.randomSeries(limit: 3000)
+        XCTAssertEqual(Set(big.map(\.id)).count, big.count, "超大 limit 也不能抽到重复")
+        XCTAssertLessThanOrEqual(big.count, 3000)
+    }
+
+    /// 连续多批新剧必须互不重叠（推荐页滑到底会反复续抽）
+    func testNewestManyBatchesStayDisjoint() {
+        guard LocalIndex.shared.totalCount > 1000 else { return XCTFail("索引没加载") }
+        var seen = Set<String>()
+        var offset = 0
+        for _ in 0..<5 {
+            let r = LocalIndex.shared.newest(offset: offset, limit: 50)
+            XCTAssertEqual(r.items.count, 50, "每批应取满 50 条")
+            for s in r.items {
+                XCTAssertTrue(seen.insert(s.id).inserted, "跨批重复：\(s.id)")
             }
-            XCTAssertEqual(got.total, 2000, "总量要如实返回（界面显示全库条数）")
-            XCTAssertEqual(got.list.count, 50, "只解 limit 条，内存与库大小无关")
-            XCTAssertEqual(Set(got.list.map(\.id)).count, 50, "样本不应重复")
+            offset = r.next
         }
+        XCTAssertEqual(seen.count, 250)
     }
 
-    func testSampleIndexCacheIsSpreadAcrossWholeLibrary() {
-        withIndexFile {
-            let all: [Series] = (0..<2000).map { Series(id: "s-\($0)", title: "t") }
-            try? JSONEncoder().encode(all).write(to: Catalog.indexCacheURL)
-            guard let got = Catalog.sampleIndexCache(limit: 50) else { return XCTFail("抽样失败") }
-            let nums = got.list.compactMap { Int($0.id.dropFirst(2)) }
-            XCTAssertEqual(nums.count, 50)
-            // 蓄水池抽样要铺满全库，不能只取头部（阈值放到 800/1200，误判概率可忽略）
-            XCTAssertLessThan(nums.min() ?? 9999, 800, "样本全落在尾部 → 抽样不是均匀的")
-            XCTAssertGreaterThan(nums.max() ?? -1, 1200, "样本全落在头部 → 抽样不是均匀的")
+    /// 全库随机带 excluding 连抽三轮，整体仍不重复（推荐页去重就靠它）
+    func testRandomSeriesExcludingAcrossRoundsStaysUnique() {
+        guard LocalIndex.shared.totalCount > 1000 else { return XCTFail("索引没加载") }
+        var seen = Set<String>()
+        for _ in 0..<3 {
+            let got = LocalIndex.shared.randomSeries(limit: 40, excluding: seen)
+            XCTAssertFalse(got.isEmpty, "excluding 之后抽不出来了")
+            for s in got {
+                XCTAssertTrue(seen.insert(s.id).inserted, "跨轮重复：\(s.id)")
+            }
         }
+        XCTAssertEqual(seen.count, 120)
     }
 
-    func testSampleIndexCacheHandlesTrickyStringsAndUnknownFormats() {
-        withIndexFile {
-            // 标题/简介/标签里塞满花括号、方括号、引号、反斜杠 —— 扫描器按字符串状态切记录，
-            // 切错了就会解出半个 JSON。这些内容必须原样取回。
-            let tricky: [Series] = (0..<30).map { i in
-                Series(id: "t-\(i)",
-                       title: "标题{\(i)}「括号」[方]\\反斜杠\"引号\"",
-                       cover: "https://e.com/{a}/b?q=[1]&r=\"x\"",
-                       intro: "简介里有 } 和 { 还有 \\ 反斜杠 \(i)",
-                       tags: ["标签{a}", "b]c"])
-            }
-            try? JSONEncoder().encode(tricky).write(to: Catalog.indexCacheURL)
-            guard let got = Catalog.sampleIndexCache(limit: 30) else { return XCTFail("抽样失败") }
-            XCTAssertEqual(got.total, 30)
-            let byId = Dictionary(uniqueKeysWithValues: got.list.map { ($0.id, $0) })
-            for t in tricky {
-                XCTAssertEqual(byId[t.id]?.title, t.title, "标题必须原样取回")
-                XCTAssertEqual(byId[t.id]?.intro, t.intro, "简介必须原样取回")
-                XCTAssertEqual(byId[t.id]?.tags, t.tags, "标签必须原样取回")
-            }
-            // 不是自家写的 JSON 数组就别猜格式
-            try? Data("{\"a\":1}\n{\"b\":2}\n".utf8).write(to: Catalog.indexCacheURL)
-            XCTAssertNil(Catalog.sampleIndexCache(limit: 5), "JSONL 不是本项目格式，应放弃")
-            try? Data("[]".utf8).write(to: Catalog.indexCacheURL)
-            XCTAssertNil(Catalog.sampleIndexCache(limit: 5), "空数组应放弃")
-            try? Data("not json".utf8).write(to: Catalog.indexCacheURL)
-            XCTAssertNil(Catalog.sampleIndexCache(limit: 5), "垃圾内容应放弃")
-        }
-    }
 
     // MARK: - 6. 转码档位与路径
 
