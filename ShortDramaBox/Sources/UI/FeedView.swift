@@ -178,6 +178,35 @@ enum VideoFit {
 
 // MARK: - 推荐流数据
 
+
+// MARK: - 推荐流混合配方
+
+/// 推荐流的混合配方：**爆剧 : 新剧 = 7 : 3**，「其他剧」（内置全库均匀随机）占三成。
+///
+/// 想更偏爆剧就把 `hotWeight` 调大，想多看新剧就调大 `newWeight`，
+/// 想多刷到冷门老剧就调大 `otherShare` —— 只改这三个数，别的都不用动。
+enum FeedMix {
+    /// 爆剧（首页板块 + 频道首页的站方推荐位）
+    static let hotWeight = 7
+    /// 新剧（内置全库「最新在前」）
+    static let newWeight = 3
+    /// 其他剧（内置全库均匀随机）在每一批里占的比例
+    static let otherShare = 0.30
+    /// 每批条数（首批 + 每次续抽）
+    static let batchSize = 240
+
+    /// 算一批的配额。爆剧池是有限的（首页 + 频道首页就那么多），
+    /// 抽完之后缺额自动让给新剧；新剧也不够时由调用方再让给其他剧。
+    static func plan(hotAvailable: Int, batchSize: Int = FeedMix.batchSize) -> (hot: Int, new: Int, other: Int) {
+        guard batchSize > 0 else { return (0, 0, 0) }
+        let other = Int((Double(batchSize) * otherShare).rounded())
+        let priority = max(0, batchSize - other)
+        let hotIdeal = priority * hotWeight / (hotWeight + newWeight)
+        let hot = min(hotIdeal, max(0, hotAvailable))
+        return (hot, priority - hot, other)
+    }
+}
+
 @MainActor
 /// 推荐流数据。
 ///
@@ -194,6 +223,15 @@ final class FeedModel: ObservableObject {
     private var appending = false
     /// 推荐流常驻条数上限：约 1200 条，内存恒定在 1MB 以内，不随库大小膨胀
     static let itemCap = 1200
+
+    /// 爆剧池：首页板块 + 各频道第 1 页的站方推荐位。有限池，抽完为止。
+    private var hotPool: [Series] = []
+    private var hotCursor = 0
+    /// 新剧游标：已经扫到「最新在前」顺序的第几条（跨批次推进，不重复）
+    private var newCursor = 0
+    /// 本会话已经放进推荐流的剧 id，跨批次全局去重
+    private var seenIDs = Set<String>()
+
     @Published private(set) var loading = true
     @Published private(set) var error: String?
     @Published private(set) var poolNote = ""
@@ -204,51 +242,90 @@ final class FeedModel: ObservableObject {
     private var currentIndex = 0
     private let prefetchAhead = 1
 
-    /// 推荐池：优先用全量索引（几百上千部），没有就用首页那几十部
+    /// 推荐池：**爆剧 : 新剧 = 7 : 3**，再加约三成从内置全库（58.8 万条）均匀随机
+    /// 抽的「其他剧」；全部按 id 去重后整批打乱。抽样/解码都在后台线程。
     func load() async {
         loading = true; error = nil
-        var pool: [Series] = []
-        var note = ""
+        hotCursor = 0; newCursor = 0; seenIDs.removeAll()
 
-        // 1) 本地全量索引（之前「分类」页建过就有）
-        // 只抽 240 条随机样本，不再把全库 58 万条解进内存（闪退根因之一）。
-        // 抽样在后台线程做：要顺序扫一遍索引文件。
-        if let cached = await Task.detached(operation: { Catalog.sampleIndexCache(limit: 240) }).value {
-            pool = cached.list
-            note = "全量片库 \(cached.total) 部"
-            sampleTotal = cached.total
-        }
-
-        // 2) 首页板块（一定有，作为保底/补充）
-        var home: [Series] = []
-        if let secs = try? await Catalog.home() { home = secs.flatMap { $0.items } }
-
-        if pool.isEmpty {
-            pool = home
-            note = "首页推荐 \(pool.count) 部"
-            // 首页太少就现场翻几页分类补齐
-            if pool.count < 40 {
-                for c in Catalog.categories {
-                    if let more = try? await Catalog.category(c.slug, page: 1) { pool += more }
-                    if pool.count >= 120 { break }
-                }
-                note = "首页+分类 \(pool.count) 部"
+        // 爆剧池 = 首页板块 + 各频道第 1 页（站方推荐位）。网络挂了也不影响后面的本地池。
+        var hot: [Series] = []
+        if let secs = try? await Catalog.home() { hot = secs.flatMap { $0.items } }
+        if hot.count < 40 {
+            for c in Catalog.categories {
+                if let more = try? await Catalog.category(c.slug, page: 1) { hot += more }
+                if hot.count >= 160 { break }
             }
-        } else {
-            // 索引里可能没有首页新上的，混进去
-            pool += home
         }
+        var hotSeen = Set<String>()
+        hotPool = hot.filter { !$0.title.isEmpty && hotSeen.insert($0.id).inserted }
 
-        var seen = Set<String>()
-        let uniq = pool.filter { seen.insert($0.id).inserted }
-        guard !uniq.isEmpty else {
+        // 内置全库（21MB 压缩、58.8 万条）：本地解码，不联网。
+        // 首次要解压 + 建「最新在前」顺序，都别挂主线程。
+        let info = await Task.detached(operation: {
+            (ready: LocalIndex.shared.isReady, total: LocalIndex.shared.totalCount)
+        }).value
+        sampleTotal = info.total
+
+        var batch = await nextBatch()
+        if batch.isEmpty && !info.ready {
+            // 内置索引没起来（资源缺失）时兜底：至少把爆剧池打乱放出去
+            batch = hotPool.shuffled().map { FeedItem(series: $0) }
+            poolNote = "首页推荐 \(batch.count) 部，随机播放"
+        } else {
+            poolNote = "爆剧 \(hotPool.count) 部 · 全库 \(sampleTotal) 部 · 7:3 混合随机"
+        }
+        guard !batch.isEmpty else {
             error = "没有拿到推荐内容，检查下网络"
             loading = false
             return
         }
-        items = uniq.shuffled().map { FeedItem(series: $0) }
-        poolNote = note + "，随机播放"
+        items = batch
         loading = false
+    }
+
+    /// 组一批：按 `FeedMix.plan` 的配额从三个池子取，全局去重后打乱。
+    /// 爆剧池抽完之后，缺额自动流向新剧；新剧不够再流向「其他剧」。
+    private func nextBatch() async -> [FeedItem] {
+        let plan = FeedMix.plan(hotAvailable: max(0, hotPool.count - hotCursor))
+        var picked: [Series] = []
+
+        // 1) 爆剧（有限池，抽完为止）
+        let hotTake = min(plan.hot, max(0, hotPool.count - hotCursor))
+        if hotTake > 0 {
+            picked += hotPool[hotCursor..<(hotCursor + hotTake)]
+            hotCursor += hotTake
+        }
+
+        // 2) 新剧：把爆剧的缺额一起要过来
+        let wantNew = plan.new + (plan.hot - hotTake)
+        var newGot = 0
+        if wantNew > 0 {
+            let r = await Task.detached(operation: {
+                LocalIndex.shared.newest(offset: newCursor, limit: wantNew)
+            }).value
+            newCursor = r.next
+            picked += r.items
+            newGot = r.items.count
+        }
+
+        // 3) 其他剧：全库均匀随机，含新剧的缺额
+        let wantOther = plan.other + (wantNew - newGot)
+        if wantOther > 0 {
+            let excl = seenIDs.union(picked.map(\.id))
+            let more = await Task.detached(operation: {
+                LocalIndex.shared.randomSeries(limit: wantOther, excluding: excl)
+            }).value
+            picked += more
+        }
+
+        // 4) 全局去重 + 整批打乱
+        var out: [FeedItem] = []
+        out.reserveCapacity(picked.count)
+        for s in picked.shuffled() where seenIDs.insert(s.id).inserted {
+            out.append(FeedItem(series: s))
+        }
+        return out
     }
 
     /// 把离当前位置太远的待办丢掉，避免滑太久后一堆任务堆积
@@ -266,19 +343,16 @@ final class FeedModel: ObservableObject {
         }
     }
 
-    /// 再抽一批（去重后追加）。抽样本身在后台线程。
+    /// 再抽一批（去重后追加）。抽样/解码在后台线程，不占主线程。
     private func appendSample() {
         guard !appending else { return }
         appending = true
         Task { @MainActor in
             defer { appending = false }
-            guard let more = await Task.detached(operation: { Catalog.sampleIndexCache(limit: 240) }).value
-            else { return }
-            var seen = Set(items.map(\.id))
-            let add = more.list.filter { seen.insert($0.id).inserted }
+            let add = await nextBatch()
             guard !add.isEmpty else { return }
             let room = max(0, Self.itemCap - items.count)
-            items += add.prefix(room).map { FeedItem(series: $0) }
+            items += add.prefix(room)
         }
     }
 

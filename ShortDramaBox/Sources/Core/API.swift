@@ -116,67 +116,6 @@ enum Catalog {
         return []
     }
 
-    /// 聚合首页 + 各频道多页，构建较大的搜索索引。
-    /// - Parameters:
-    ///   - pagesPerCategory: 每个频道抓多少页（每页约 24 部）
-    ///   - progress: 进度回调（已完成请求数, 总请求数, 当前已收集部数）
-
-    // MARK: - 搜索索引磁盘缓存
-
-    static var indexCacheURL: URL {
-        let d = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        return d.appendingPathComponent("search-index.json")
-    }
-
-    /// 读取缓存，返回（列表, 缓存年龄秒）。超过 maxAge 视为过期返回 nil。
-    static func loadIndexCache(maxAge: TimeInterval = 60 * 60 * 24 * 7) -> (list: [Series], age: TimeInterval)? {
-        let u = indexCacheURL
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: u.path),
-              let mod = attrs[.modificationDate] as? Date else { return nil }
-        let age = Date().timeIntervalSince(mod)
-        if age > maxAge { return nil }
-        guard let data = try? Data(contentsOf: u),
-              let list = try? JSONDecoder().decode([Series].self, from: data),
-              !list.isEmpty else { return nil }
-        return (list, age)
-    }
-
-    static func saveIndexCache(_ list: [Series]) {
-        guard !list.isEmpty, let data = try? JSONEncoder().encode(list) else { return }
-        try? data.write(to: indexCacheURL, options: .atomic)
-    }
-
-    static func clearIndexCache() {
-        try? FileManager.default.removeItem(at: indexCacheURL)
-    }
-
-    static func buildIndex(pagesPerCategory: Int = 12,
-                           progress: @escaping (Int, Int, Int) -> Void) async -> [Series] {
-        var pool: [String: Series] = [:]
-        let total = 1 + categories.count * pagesPerCategory
-        var done = 0
-        func bump() { done += 1; progress(done, total, pool.count) }
-
-        if let h = try? await home() {
-            for s in h.flatMap(\.items) { pool[s.id] = s }
-        }
-        bump()
-
-        for c in categories {
-            for p in 1...pagesPerCategory {
-                guard let list = try? await category(c.slug, page: p), !list.isEmpty else {
-                    done += (pagesPerCategory - p + 1)
-                    progress(done, total, pool.count)
-                    break
-                }
-                var added = 0
-                for s in list where pool[s.id] == nil { pool[s.id] = s; added += 1 }
-                bump()
-                if added == 0 && p > 1 { break }
-            }
-        }
-        return Array(pool.values)
-    }
 
     static func detail(_ seriesId: String) async throws -> (Series, [Episode]) {
         guard let j = routerJSON(try await friendlyGet("\(base)/detail?series_id=\(seriesId)", what: "该短剧不存在或已下架")) else { throw ApiError.noData }

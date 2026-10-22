@@ -166,4 +166,46 @@ final class IndexTests: XCTestCase {
         }
         return nil
     }
+
+    // MARK: - 推荐流取样（爆剧 / 新剧 / 其他剧）
+
+    func testNewestAdvancesWithoutOverlap() {
+        let r1 = LocalIndex.shared.newest(offset: 0, limit: 20)
+        XCTAssertEqual(r1.items.count, 20, "新剧首批没取满 20 条")
+        XCTAssertGreaterThan(r1.next, 0, "next 没推进，续抽会重复")
+        let r2 = LocalIndex.shared.newest(offset: r1.next, limit: 20)
+        XCTAssertFalse(r2.items.isEmpty, "第二批新剧取不到")
+        let dup = Set(r1.items.map(\.id)).intersection(r2.items.map(\.id))
+        XCTAssertTrue(dup.isEmpty, "两批新剧重复了：\(dup)")
+        XCTAssertTrue(LocalIndex.shared.newest(offset: -5, limit: 3).items.count > 0, "负数 offset 应该被夹到 0")
+    }
+
+    func testRandomSeriesIsUniqueAndHonoursExcluding() {
+        let a = LocalIndex.shared.randomSeries(limit: 50)
+        XCTAssertEqual(a.count, 50, "全库随机没抽满 50 条")
+        XCTAssertEqual(Set(a.map(\.id)).count, 50, "全库随机抽到重复")
+        let excl = Set(a.map(\.id))
+        let b = LocalIndex.shared.randomSeries(limit: 30, excluding: excl)
+        XCTAssertFalse(b.isEmpty, "带 excluding 就抽不出来了")
+        XCTAssertTrue(Set(b.map(\.id)).isDisjoint(with: excl), "excluding 没生效，续抽会跟前面重复")
+    }
+
+    func testFeedMixWeightsAreSevenToThree() {
+        let p = FeedMix.plan(hotAvailable: 999, batchSize: 240)
+        XCTAssertEqual(p.hot + p.new + p.other, 240, "配额加起来不等于每批条数")
+        XCTAssertEqual(p.other, 72, "其他剧该占三成（72/240）")
+        XCTAssertEqual(p.hot, 117, "爆剧该是优先池的十分之七")
+        XCTAssertEqual(p.new, 51, "新剧该是优先池的十分之三")
+    }
+
+    func testFeedMixGivesHotShortfallToNew() {
+        let none = FeedMix.plan(hotAvailable: 0, batchSize: 240)
+        XCTAssertEqual(none.hot, 0)
+        XCTAssertEqual(none.new, 168, "爆剧池空了，缺额应该全给新剧")
+        XCTAssertEqual(none.other, 72)
+        let few = FeedMix.plan(hotAvailable: 10, batchSize: 240)
+        XCTAssertEqual(few.hot, 10, "爆剧不够就按实际给，不超发")
+        XCTAssertEqual(few.new, 158)
+    }
+
 }

@@ -77,11 +77,12 @@ final class LocalIndex {
     // MARK: - 装载
 
     private func load() {
-        HGLog.i("索引", "开始加载本地全库索引")
         lock.lock()
         defer { lock.unlock() }
         if loaded { return }
         loaded = true
+        // 日志挪到锁后面：并发调用只打一行，不再刷十几行噪声
+        HGLog.i("索引", "开始加载本地全库索引")
         guard let url = Bundle.main.url(forResource: "index.bin", withExtension: "z"),
               let packed = try? Data(contentsOf: url, options: .mappedIfSafe),
               packed.count > 8 else { return }
@@ -268,6 +269,49 @@ final class LocalIndex {
             $0.loadUnaligned(fromByteOffset: createdOff + index * 4, as: UInt32.self)
         }
     }
+
+    // MARK: - 推荐流取样
+
+    /// 「新剧」：按「最新在前」（created 倒序）取一段，解码成可播的记录。
+    /// - Parameters:
+    ///   - offset: 上次返回到的 `next`（跨批次不重复）
+    ///   - limit: 本批最多要几条
+    /// - Returns: `items` 本批记录；`next` 下次的起点。个别记录被截断会顺延，
+    ///   所以最多往后多看 3 倍下标，避免一条坏数据卡住整条流。
+    func newest(offset: Int, limit: Int) -> (items: [Series], next: Int) {
+        load()
+        guard limit > 0, data != nil, count > 0 else { return ([], max(0, offset)) }
+        let ord = timeDescOrder()
+        var out: [Series] = []
+        out.reserveCapacity(limit)
+        var i = max(0, min(offset, ord.count))
+        let stop = min(ord.count, i + limit * 3)
+        while i < stop, out.count < limit {
+            if let s = series(at: Int(ord[i])) { out.append(s) }
+            i += 1
+        }
+        return (out, i)
+    }
+
+    /// 「其他剧」：从全库（58.8 万条）均匀随机抽 `limit` 条，跳过 `excluding` 里的 id。
+    /// 重复命中会重抽，所以实际条数可能略少；调用方按返回条数用。
+    func randomSeries(limit: Int, excluding: Set<String> = []) -> [Series] {
+        load()
+        guard limit > 0, data != nil, count > 0 else { return [] }
+        var out: [Series] = []
+        out.reserveCapacity(limit)
+        var seen = excluding
+        var attempts = 0
+        let maxAttempts = limit * 6
+        while out.count < limit, attempts < maxAttempts {
+            attempts += 1
+            guard let s = series(at: Int.random(in: 0..<count)) else { continue }
+            guard seen.insert(s.id).inserted else { continue }
+            out.append(s)
+        }
+        return out
+    }
+
 
     /// 建倒排索引。两趟扫描：先数个数把容量开好（避免反复扩容），再灌。
     /// 按「最新在前」的顺序扫，所以每个标签的列表天然就是时间倒序，
