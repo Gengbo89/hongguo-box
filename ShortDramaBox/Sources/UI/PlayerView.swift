@@ -17,6 +17,9 @@ struct PlayerView: View {
     @State private var qualityOf: [Int: String] = [:]
     /// 每集源站给的全部档位（一条都不过滤），key 是集号
     @State private var availableOf: [Int: [VideoTrack]] = [:]
+    @State private var pendingSpeed: Float = 1.0
+    @State private var pendingQuality: String? = nil
+    @State private var pendingEpisode: Int? = nil
     @State private var preferredQuality: String? = nil
     /// 下一集预下载任务（换集/退出时取消）
     @State private var prefetchTask: Task<Void, Never>? = nil
@@ -126,7 +129,12 @@ struct PlayerView: View {
                 .font(.system(size: 11)).foregroundStyle(.white.opacity(0.7))
             }
             Spacer()
-            Button { showPanel.toggle() } label: {
+            Button {
+                pendingSpeed = speed
+                pendingQuality = qualityOf[current.index] ?? preferredQuality
+                pendingEpisode = current.index
+                showPanel = true
+            } label: {
                 Image(systemName: "list.bullet").font(.system(size: 15, weight: .bold))
                     .padding(9).background(.black.opacity(0.45)).clipShape(Circle())
             }
@@ -139,16 +147,19 @@ struct PlayerView: View {
         NavigationStack {
             List {
                 Section("倍速") {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 14) {
                     ForEach(SPEEDS, id: \.self) { s in
                         Button {
-                            speed = s
+                            pendingSpeed = s
                         } label: {
                             HStack {
-                                Text(s == 1.0 ? "1x（正常）" : String(format: "%gx", s))
-                                Spacer()
-                                if speed == s { Image(systemName: "checkmark").foregroundStyle(.pink) }
+                                Text(s == 1.0 ? "1x" : String(format: "%gx", s))
+                                if pendingSpeed == s { Image(systemName: "checkmark").foregroundStyle(.pink) }
                             }
                         }
+                    }
+                    }
                     }
                 }
 
@@ -159,45 +170,48 @@ struct PlayerView: View {
                     } else {
                         // 列出源站给的全部档位，一条都不过滤；
                         // 本机解不了的编码标注「本机转码」，选中后本地补齐
+                        ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 14) {
                         ForEach(list, id: \.self) { t in
                             Button {
-                                preferredQuality = t.definition
+                                pendingQuality = t.definition
                             } label: {
                                 HStack(spacing: 8) {
                                     Text(t.definition)
                                     sourceBadge(for: t)
-                                    Spacer()
-                                    if qualityOf[current.index] == t.definition {
+                                    if pendingQuality == t.definition {
                                         Image(systemName: "checkmark").foregroundStyle(.pink)
                                     }
                                 }
                             }
                         }
+                        }
+                        }
                     }
                 } header: {
                     Text("清晰度")
                 } footer: {
-                    Text("「本机转码」= 源站这一档是 bytevc2，iOS 没有对应解码器，"
+                    Text("点选只改对勾，按「完成」才真正切换（这时才开始转码）。"
+                         + "「本机转码」= 源站这一档是 bytevc2，iOS 没有对应解码器，"
                          + "改由本机把可解码的源档转成这个分辨率；第一次播会慢几秒，之后走缓存。")
                         .font(.footnote)
                 }
 
                 Section("选集") {
-                    ForEach(episodes) { ep in
-                        Button {
-                            showPanel = false
-                            current = ep
-                            scrolledID = ep.index   // 分页跟着滚过去
-                        } label: {
-                            HStack {
-                                Text("第 \(ep.index) 集")
-                                Spacer()
-                                if ep.index == current.index {
-                                    Image(systemName: "speaker.wave.2.fill").foregroundStyle(.pink)
-                                }
+                    ScrollView {
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 5), spacing: 8) {
+                            ForEach(episodes) { ep in
+                                Text("\(ep.index)")
+                                    .font(.system(size: 13, weight: pendingEpisode == ep.index ? .bold : .regular))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 7)
+                                    .background(pendingEpisode == ep.index ? Color.pink.opacity(0.22) : Color.secondary.opacity(0.12))
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    .onTapGesture { pendingEpisode = ep.index }
                             }
                         }
                     }
+                    .frame(height: 190)
                 }
 
                 Section {
@@ -206,7 +220,22 @@ struct PlayerView: View {
                 }
             }
             .navigationTitle("播放设置").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("完成") { showPanel = false } } }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消") { showPanel = false }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成") {
+                        if pendingSpeed != speed { speed = pendingSpeed }
+                        if let q = pendingQuality, q != preferredQuality { preferredQuality = q }
+                        if let i = pendingEpisode, i != current.index,
+                           let e = episodes.first(where: { $0.index == i }) {
+                            current = e; scrolledID = e.index
+                        }
+                        showPanel = false
+                    }
+                }
+            }
         }
     }
 
