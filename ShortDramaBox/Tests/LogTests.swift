@@ -14,7 +14,7 @@ final class LogTests: XCTestCase {
 
     func testWriteAndRead() throws {
         let log = try tempLog()
-        log.i("测试", "你好 hello 123")
+        log.emit("I", "测试", "你好 hello 123")
         let t = log.text()
         XCTAssertTrue(t.contains("你好 hello 123"), t)
         XCTAssertTrue(t.contains("[I] 测试:"), t)
@@ -23,7 +23,7 @@ final class LogTests: XCTestCase {
     func testWriteImmediatelyVisible() throws {
         // 崩溃时进程直接没了，所以写下去必须立刻可读（同步写）
         let log = try tempLog()
-        log.e("测试", "立刻可读")
+        log.emit("E", "测试", "立刻可读")
         XCTAssertTrue(log.text().contains("立刻可读"))
         // 不经过 text()，直接读文件也要有
         let raw = try String(contentsOf: log.fileURL, encoding: .utf8)
@@ -33,7 +33,7 @@ final class LogTests: XCTestCase {
     func testRotationKeepsLatest() throws {
         let log = try tempLog(maxBytes: 2_000)
         for i in 0..<200 {
-            log.i("测试", "第 \(i) 行 " + String(repeating: "x", count: 40))
+            log.emit("I", "测试", "第 \(i) 行 " + String(repeating: "x", count: 40))
         }
         let t = log.text(maxBytes: 1_000_000)
         XCTAssertTrue(t.contains("第 199 行"), "最新一行必须还在：\(t.suffix(200))")
@@ -43,7 +43,7 @@ final class LogTests: XCTestCase {
 
     func testCrashRecordIsKeptAndShownFirst() throws {
         let log = try tempLog()
-        log.i("测试", "崩之前")
+        log.emit("I", "测试", "崩之前")
         log.record(kind: "测试崩溃", detail: "name=NSInternalInconsistencyException\nreason=boom")
         let t = log.text()
         XCTAssertTrue(t.contains("crash.log"), t)
@@ -55,7 +55,7 @@ final class LogTests: XCTestCase {
 
     func testClearRemovesEverything() throws {
         let log = try tempLog()
-        log.i("测试", "一条")
+        log.emit("I", "测试", "一条")
         log.record(kind: "测试崩溃", detail: "boom")
         log.clear()
         let t = log.text()
