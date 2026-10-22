@@ -141,6 +141,10 @@ struct PlayerView: View {
                 pendingQuality = qualityOf[current.index]
                     ?? preferredQuality
                     ?? availableOf[current.index]?.first?.definition
+                if let list = availableOf[current.index], !list.isEmpty,
+                   !list.contains(where: { $0.definition == (pendingQuality ?? "") }) {
+                    pendingQuality = list.first?.definition
+                }
                 pendingEpisode = current.index
                 showPanel = true
             } label: {
@@ -176,7 +180,10 @@ struct PlayerView: View {
         let list = await PlayerAPI.allTracks(for: current.vid)
         guard !list.isEmpty else { return }
         availableOf[idx] = list
-        if pendingQuality == nil { pendingQuality = list.first?.definition }
+        if pendingQuality == nil
+            || !list.contains(where: { $0.definition == (pendingQuality ?? "") }) {
+            pendingQuality = list.first?.definition
+        }
     }
 
     /// 选项胶囊（点选只改对勾，按「完成」才生效）
