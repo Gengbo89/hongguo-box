@@ -77,6 +77,7 @@ final class LocalIndex {
     // MARK: - 装载
 
     private func load() {
+        HGLog.i("索引", "开始加载本地全库索引")
         lock.lock()
         defer { lock.unlock() }
         if loaded { return }

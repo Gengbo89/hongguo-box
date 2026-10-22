@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct DuanjuApp: App {
+    init() { HGLog.start() }
     var body: some Scene {
         WindowGroup {
             RootView()
@@ -25,5 +26,6 @@ struct RootView: View {
             HistoryView().tag(4).tabItem { Label("记录", systemImage: "clock.fill") }
         }
         .tint(.pink)
+        .onChange(of: tab) { t in HGLog.i("界面", "切到第 \(t) 个 Tab") }
     }
 }

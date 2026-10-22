@@ -28,6 +28,7 @@ struct HomeView: View {
     @State private var err: String?
     @State private var loading = true
     @State private var showAbout = false
+    @State private var showLog = false
 
     var body: some View {
         NavigationStack {
@@ -39,12 +40,18 @@ struct HomeView: View {
             .navigationTitle("短剧盒子")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button { showLog = true } label: {
+                        Image(systemName: "doc.text.magnifyingglass")
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     Button { showAbout = true } label: {
                         Image(systemName: "info.circle")
                     }
                 }
             }
             .sheet(isPresented: $showAbout) { AboutView() }
+            .sheet(isPresented: $showLog) { LogView() }
             .task { await load() }
         }
     }

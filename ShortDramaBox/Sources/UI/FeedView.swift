@@ -366,6 +366,7 @@ final class FeedModel: ObservableObject {
 
         // 详情（拿集数）
         guard let (full, eps) = try? await Catalog.detail(series.id), !eps.isEmpty else {
+            HGLog.w("推荐", "\(series.title) 拿不到剧集，标记暂无片源")
             if isCurrent(i, series.id) { setStatus(i, .failed("暂无片源")) }
             return
         }
@@ -385,6 +386,7 @@ final class FeedModel: ObservableObject {
         let ep = eps.first { $0.index == 1 } ?? eps[0]
         items[i].episode = ep
         items[i].episodes = eps
+        HGLog.i("推荐", "\(series.title) 共 \(eps.count) 集")
 
         // 取流：全部档位都要，播不了的留给本机转码
         let tracks = await PlayerAPI.allTracks(for: ep.vid)

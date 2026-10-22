@@ -602,6 +602,7 @@ private struct EpisodePage: View {
                                     seekTarget = position
                                     seekPinUntil = Date().addingTimeInterval(1.5)
                                     player?.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
+                                    HGLog.i("播放", "拖到 " + String(format: "%.1f", position) + "s / " + String(format: "%.1f", duration) + "s")
                                     scrubbing = false
                                     if wasPlaying {
                                         player?.play()
@@ -937,6 +938,7 @@ private struct ScrubBar: View {
             guard let best = PlayerAPI.pick(tracks, force: forceQuality) else {
                 status = "无可用清晰度"; failed = true; return
             }
+            HGLog.i("播放", "第 \(episode.index) 集 选中 \(best.definition)（候选 \(tracks.count) 档，" + (PlayerAPI.needsTranscode(best) ? "需本机转码" : "可直接播") + "）")
             onQuality(best.definition)
             playingNote = best.note
             // 接口给的尺寸：横屏片源靠它避开「被截一条铺满屏幕」
@@ -982,6 +984,7 @@ private struct ScrubBar: View {
             if speed != 1.0 { p.rate = speed }
             paused = false
             ready = true
+            HGLog.i("播放", "第 \(episode.index) 集 已就绪 \(best.definition)")
 
             timeObs = p.addPeriodicTimeObserver(
                 forInterval: CMTime(seconds: 5, preferredTimescale: 600), queue: .main) { t in
@@ -1017,6 +1020,7 @@ private struct ScrubBar: View {
                 Task { @MainActor in onEnded() }
             }
         } catch {
+            HGLog.e("播放", "第 \(episode.index) 集 加载失败: \(error)")
             status = "加载失败: \(error)"; failed = true
         }
     }

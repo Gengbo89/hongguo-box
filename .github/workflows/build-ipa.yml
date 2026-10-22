@@ -45,7 +45,6 @@ jobs:
       # 失败就 exit 非 0：后面出包/发 Release 都带 if: success()，
       # 于是「测试不过就不发版」，不再把 bug 丢给用户去发现。
       - name: 单元测试（iOS 模拟器）
-        continue-on-error: true
         run: |
           set +e
           cd ShortDramaBox

@@ -359,6 +359,7 @@ enum MediaStore {
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> URL {
         // 公开明文备用源、以及标准编码，直接走原流程
+        HGLog.i("取流", "\(track.definition) vid=\(vid) 需转码=" + (PlayerAPI.needsTranscode(track) ? "是" : "否"))
         guard PlayerAPI.needsTranscode(track) else {
             return try await prepare(vid: vid, track: track, progress: progress)
         }

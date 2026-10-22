@@ -117,6 +117,7 @@ enum Transcoder {
         // 显示尺寸 = 自然尺寸套上旋转矩阵，竖屏/横屏两种存储方式都兼容
         let oriented = CGRect(origin: .zero, size: natural).applying(transform)
         let displayW = abs(oriented.width), displayH = abs(oriented.height)
+        HGLog.i("转码", "开始本机转码 \(Int(displayW))x\(Int(displayH))")
         guard displayW > 0, displayH > 0 else { throw TranscoderError.noVideoTrack }
 
         // 按短边等比缩放；宽高取偶数，H.264/HEVC 都要求偶数分辨率

@@ -9,7 +9,11 @@ func be32(_ d: [UInt8], _ o: Int) -> Int {
 }
 func be64(_ d: [UInt8], _ o: Int) -> Int {
     guard o + 8 <= d.count else { return 0 }
-    return (be32(d, o) << 32) | be32(d, o + 4)
+    // 高 32 位可达 0xFFFFFFFF，左移 32 位会超过 Int64 上限（9.2e18），
+    // 而 Swift 的有符号溢出是直接 trap 闪退。这种天文长度只会出现在损坏或
+    // 被截断的文件里：夹到 Int.max，交给下游的边界检查丢掉，别把进程带走。
+    let v = (UInt64(be32(d, o)) << 32) | UInt64(be32(d, o + 4))
+    return v > UInt64(Int.max) ? Int.max : Int(v)
 }
 func be64u(_ d: [UInt8], _ o: Int) -> UInt64 {
     guard o + 8 <= d.count else { return 0 }
@@ -26,7 +30,8 @@ func boxes(_ d: [UInt8], _ s: Int, _ e: Int) -> [Box] {
         var sz = be32(d, o); let t = fourCC(d, o + 4); var hs = 8
         if sz == 1 { sz = be64(d, o + 8); hs = 16 }
         else if sz == 0 { sz = e - o }
-        if sz < hs || o + sz > e { break }
+        // 用减法比较：sz 极大时 o + sz 会溢出 trap（be64 已夹住，这里再保一道）
+        if sz < hs || sz > e - o { break }
         out.append(Box(type: t, start: o, end: o + sz, hdr: hs))
         o += sz
     }
