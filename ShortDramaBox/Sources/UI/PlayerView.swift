@@ -458,8 +458,11 @@ private struct EpisodePage: View {
     @State private var progress: Double = 0
     @State private var ready = false
     @State private var timeObs: Any?
+    @State private var timeObsOwner: AVPlayer?
     /// 进度条专用的时间观察（0.3 秒一次；上面那个 5 秒的只管写观看记录）
     @State private var scrubObs: Any?
+    @State private var scrubObsOwner: AVPlayer?
+    @State private var loadGen = 0
     /// 当前播放位置（秒）
     @State private var position: Double = 0
     /// 这一集总时长（秒），0 表示还不知道
@@ -881,7 +884,17 @@ private struct ScrubBar: View {
         if player?.timeControlStatus == .playing { player?.rate = s }
     }
 
+    private func detachTimeObs() {
+        if let o = timeObs, let owner = timeObsOwner { owner.removeTimeObserver(o) }
+        timeObs = nil; timeObsOwner = nil
+    }
+    private func detachScrubObs() {
+        if let o = scrubObs, let owner = scrubObsOwner { owner.removeTimeObserver(o) }
+        scrubObs = nil; scrubObsOwner = nil
+    }
+
     private func cleanup() {
+        loadGen &+= 1
         PlaybackCenter.shared.release("ep:\(episode.vid)")
         // 拆播放器之前记住播到哪了，滑回来接着放
         if let p = player {
@@ -892,8 +905,8 @@ private struct ScrubBar: View {
         endBoost()
         boosting = false; paused = false
         hideTask?.cancel(); hideTask = nil
-        if let o = timeObs { player?.removeTimeObserver(o); timeObs = nil }
-        if let o = scrubObs { player?.removeTimeObserver(o); scrubObs = nil }
+        detachTimeObs()
+        detachScrubObs()
         if let o = endObs { NotificationCenter.default.removeObserver(o); endObs = nil }
         player?.pause(); player = nil
     }
@@ -910,14 +923,16 @@ private struct ScrubBar: View {
             if !paused { p.play() }
             return
         }
+        let gen = loadGen &+ 1
+        loadGen = gen
         started = true
         autoRetried = false
         failed = false
         ready = false; progress = 0; status = "获取播放地址…"
         duration = 0; position = 0; scrubbing = false
         showBar = false; hideTask?.cancel(); hideTask = nil
-        if let o = timeObs { player?.removeTimeObserver(o); timeObs = nil }
-        if let o = scrubObs { player?.removeTimeObserver(o); scrubObs = nil }
+        detachTimeObs()
+        detachScrubObs()
         player?.pause(); player = nil
 
         do {
@@ -934,6 +949,7 @@ private struct ScrubBar: View {
                     status = "该集暂无可用片源"; failed = true; return
                 }
             }
+            guard gen == loadGen else { return }
             onTracks(tracks)
             guard let best = PlayerAPI.pick(tracks, force: forceQuality) else {
                 status = "无可用清晰度"; failed = true; return
@@ -955,6 +971,7 @@ private struct ScrubBar: View {
                         : "下载并解密中 \(pct)%"
                 }
             }
+            guard gen == loadGen else { return }
             let p = AVPlayer(url: url)
             // 限住前向缓冲：本地文件 AVPlayer 会尽量往前读，1080p 一集 6.6MB
             // 它会整集读进内存。限成 6 秒之后播放期间的内存曲线立刻平下来
@@ -979,6 +996,7 @@ private struct ScrubBar: View {
             }
             // 申请全局播放权：进播放页时把推荐页底下那张卡片停掉，
             // 否则两个画面同时出声。
+            guard gen == loadGen else { p.pause(); return }
             PlaybackCenter.shared.claim("ep:\(episode.vid)") { [weak p] in p?.pause() }
             p.play()
             if speed != 1.0 { p.rate = speed }
@@ -986,6 +1004,7 @@ private struct ScrubBar: View {
             ready = true
             HGLog.i("播放", "第 \(episode.index) 集 已就绪 \(best.definition)")
 
+            timeObsOwner = p
             timeObs = p.addPeriodicTimeObserver(
                 forInterval: CMTime(seconds: 5, preferredTimescale: 600), queue: .main) { t in
                 let sec = CMTimeGetSeconds(t)
@@ -995,7 +1014,8 @@ private struct ScrubBar: View {
             }
 
             // 进度条：0.3 秒刷一次当前位置和总时长
-            if let o = scrubObs { p.removeTimeObserver(o); scrubObs = nil }
+            detachScrubObs()
+            scrubObsOwner = p
             scrubObs = p.addPeriodicTimeObserver(
                 forInterval: CMTime(seconds: 0.3, preferredTimescale: 600), queue: .main) { t in
                 let sec = CMTimeGetSeconds(t)
