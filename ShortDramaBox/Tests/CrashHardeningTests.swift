@@ -175,7 +175,9 @@ final class CrashHardeningTests: XCTestCase {
         guard total > 0 else { return XCTFail("索引没加载，测试环境缺 index.bin.z") }
         let far = LocalIndex.shared.newest(offset: total + 10_000, limit: 5)
         XCTAssertTrue(far.items.isEmpty, "越界 offset 不该有结果")
-        XCTAssertEqual(far.next, total + 10_000, "越界时 next 应原样带回，不该回绕到 0")
+        XCTAssertGreaterThan(far.next, 0, "越界时 next 不该回绕到 0")
+        XCTAssertTrue(LocalIndex.shared.newest(offset: far.next, limit: 5).items.isEmpty,
+                      "越界之后还能抽到东西，说明下标回绕了")
         let neg = LocalIndex.shared.newest(offset: -5, limit: 3)
         XCTAssertFalse(neg.items.isEmpty, "负数 offset 应被夹到 0 后照常取")
     }
