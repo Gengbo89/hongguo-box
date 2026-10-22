@@ -20,6 +20,8 @@ struct PlayerView: View {
     @State private var pendingSpeed: Float = 1.0
     @State private var pendingQuality: String? = nil
     @State private var pendingEpisode: Int? = nil
+    /// 拖进度条时锁住翻页，免得横向拖动被当成上下翻页
+    @State private var pagerLocked = false
     @State private var preferredQuality: String? = nil
     /// 下一集预下载任务（换集/退出时取消）
     @State private var prefetchTask: Task<Void, Never>? = nil
@@ -45,6 +47,7 @@ struct PlayerView: View {
                             forceQuality: preferredQuality,
                             onQuality: { q in qualityOf[ep.index] = q },
                             onTracks: { list in availableOf[ep.index] = list },
+                            onScrub: { b in pagerLocked = b },
                             onEnded: {
                                 // 播完自动跳下一集（页面会跟着滑过去）
                                 if let nxt = episodes.first(where: { $0.index == ep.index + 1 }) {
@@ -67,8 +70,10 @@ struct PlayerView: View {
             .scrollTargetBehavior(.paging)
             .scrollPosition(id: $scrolledID)
             .scrollIndicators(.hidden)
+            .scrollDisabled(pagerLocked)
             .ignoresSafeArea()
         }
+        .defersSystemGestures(on: .bottom)
         .onChange(of: scrolledID) { v in
             if let v, let e = episodes.first(where: { $0.index == v }) {
                 current = e
@@ -143,75 +148,121 @@ struct PlayerView: View {
         .padding(.horizontal).padding(.top, 8)
     }
 
+    /// 区块小标题（可带一句说明）
+    @ViewBuilder
+    private func groupHead(_ title: String, _ hint: String? = nil) -> some View {
+        HStack(spacing: 8) {
+            Text(title).font(.system(size: 15, weight: .semibold))
+            if let hint { Text(hint).font(.footnote).foregroundStyle(.secondary) }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// 选项胶囊（点选只改对勾，按「完成」才生效）
+    private func chip(_ text: String, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(text)
+                .font(.system(size: 14, weight: on ? .semibold : .regular))
+                .foregroundStyle(on ? Color.white : Color.primary)
+                .padding(.horizontal, 15).padding(.vertical, 10)
+                .background(on ? Color.pink : Color.secondary.opacity(0.13))
+                .clipShape(Capsule())
+                .overlay(Capsule().stroke(on ? Color.clear : Color.secondary.opacity(0.28), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 清晰度胶囊：带「本机转码 / 明文源」来源标记
+    private func qualityChip(_ t: VideoTrack, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(t.definition).font(.system(size: 14, weight: on ? .semibold : .regular))
+                    if on { Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)) }
+                }
+                sourceBadge(for: t)
+            }
+            .foregroundStyle(on ? Color.white : Color.primary)
+            .padding(.horizontal, 14).padding(.vertical, 9)
+            .background(on ? Color.pink : Color.secondary.opacity(0.13))
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14)
+                .stroke(on ? Color.clear : Color.secondary.opacity(0.28), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 选集格子：选中=粉色实心，正在播=粉色描边
+    private func epCell(_ ep: Episode) -> some View {
+        let on = pendingEpisode == ep.index
+        let playing = ep.index == current.index
+        return Button { pendingEpisode = ep.index } label: {
+            Text("\(ep.index)")
+                .font(.system(size: 14, weight: on ? .semibold : .regular))
+                .foregroundStyle(on ? Color.white : Color.primary)
+                .frame(maxWidth: .infinity, minHeight: 42)
+                .background(on ? Color.pink : Color.secondary.opacity(0.11))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10)
+                    .stroke(playing && !on ? Color.pink : Color.clear, lineWidth: 1.5))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 播放设置：横向胶囊（不再纵向拉长）+ 选集网格
     private var panel: some View {
         NavigationStack {
             List {
-                Section("倍速") {
+                Section {
                     ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 14) {
-                    ForEach(SPEEDS, id: \.self) { s in
-                        Button {
-                            pendingSpeed = s
-                        } label: {
-                            HStack {
-                                Text(s == 1.0 ? "1x" : String(format: "%gx", s))
-                                if pendingSpeed == s { Image(systemName: "checkmark").foregroundStyle(.pink) }
+                        HStack(spacing: 10) {
+                            ForEach(SPEEDS, id: \.self) { s in
+                                chip(s == 1.0 ? "1x（正常）" : String(format: "%gx", s),
+                                     on: pendingSpeed == s) { pendingSpeed = s }
                             }
                         }
+                        .padding(.vertical, 6)
                     }
-                    }
-                    }
+                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 0))
+                } header: {
+                    groupHead("倍速", "长按画面可临时加速")
                 }
 
                 Section {
-                    let list = availableOf[current.index] ?? []
-                    if list.isEmpty {
-                        Text("正在解析…").foregroundStyle(.secondary).font(.footnote)
+                    if (availableOf[current.index] ?? []).isEmpty {
+                        Text("正在解析…").font(.footnote).foregroundStyle(.secondary)
                     } else {
-                        // 列出源站给的全部档位，一条都不过滤；
-                        // 本机解不了的编码标注「本机转码」，选中后本地补齐
                         ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 14) {
-                        ForEach(list, id: \.self) { t in
-                            Button {
-                                pendingQuality = t.definition
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Text(t.definition)
-                                    sourceBadge(for: t)
-                                    if pendingQuality == t.definition {
-                                        Image(systemName: "checkmark").foregroundStyle(.pink)
+                            HStack(spacing: 10) {
+                                ForEach(availableOf[current.index] ?? [], id: \.self) { t in
+                                    qualityChip(t, on: pendingQuality == t.definition) {
+                                        pendingQuality = t.definition
                                     }
                                 }
                             }
+                            .padding(.vertical, 6)
                         }
-                        }
-                        }
+                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 0))
                     }
                 } header: {
-                    Text("清晰度")
+                    groupHead("清晰度", "「本机转码」= 源站这档 iOS 解不了，改由本机补")
                 } footer: {
-                    Text("点选只改对勾，按「完成」才真正切换（这时才开始转码）。"
-                         + "「本机转码」= 源站这一档是 bytevc2，iOS 没有对应解码器，"
-                         + "改由本机把可解码的源档转成这个分辨率；第一次播会慢几秒，之后走缓存。")
+                    Text("点选只改对勾，按「完成」才真正切换：清晰度这时才开始转码。")
                         .font(.footnote)
                 }
 
-                Section("选集") {
+                Section {
                     ScrollView {
-                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 5), spacing: 8) {
-                            ForEach(episodes) { ep in
-                                Text("\(ep.index)")
-                                    .font(.system(size: 13, weight: pendingEpisode == ep.index ? .bold : .regular))
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 7)
-                                    .background(pendingEpisode == ep.index ? Color.pink.opacity(0.22) : Color.secondary.opacity(0.12))
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                                    .onTapGesture { pendingEpisode = ep.index }
-                            }
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 5),
+                                  spacing: 10) {
+                            ForEach(episodes) { ep in epCell(ep) }
                         }
+                        .padding(.vertical, 8)
                     }
-                    .frame(height: 190)
+                    .frame(height: 250)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                } header: {
+                    groupHead("选集", "正在播第 \(current.index) 集 · 共 \(episodes.count) 集")
                 }
 
                 Section {
@@ -359,6 +410,8 @@ private struct EpisodePage: View {
     let forceQuality: String?
     var onQuality: (String) -> Void
     var onTracks: ([VideoTrack]) -> Void
+    /// 拖进度条时通知外层锁住翻页
+    var onScrub: (Bool) -> Void
     var onEnded: () -> Void
 
     @State private var player: AVPlayer?
@@ -495,11 +548,13 @@ private struct EpisodePage: View {
                             duration: duration,
                             onEditing: { editing in
                                 if editing {
+                                    onScrub(true)
                                     scrubbing = true
                                     wasPlaying = (player?.rate ?? 0) > 0
                                     player?.pause()
                                     hideTask?.cancel()
                                 } else {
+                                    onScrub(false)
                                     let t = CMTime(seconds: position, preferredTimescale: 600)
                                     player?.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
                                     scrubbing = false
@@ -517,9 +572,9 @@ private struct EpisodePage: View {
                             .foregroundStyle(.white.opacity(0.8))
                             .frame(width: 46, alignment: .leading)
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 8)
-                    .padding(.top, 8)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 34)
+                    .padding(.top, 10)
                     .background(
                         LinearGradient(colors: [.black.opacity(0), .black.opacity(0.55)],
                                        startPoint: .top, endPoint: .bottom)
@@ -702,10 +757,10 @@ private struct EpisodePage: View {
         }
     }
 
-    /// 自绘进度条。
-///
-/// 不用 SwiftUI 的 Slider：iOS 上不给改 thumb 尺寸，那个圆点太大。
-/// 自己画一个：3pt 轨道 + 9pt 圆点，点一下定位、按住拖也能定位。
+    /// 自绘进度条：3pt 轨道 + 10pt 圆点，触摸区 34pt 高（细，但好拖）。
+/// 关键：整条必须离屏幕底边足够远。贴底会被 iOS 的 home 手势区吃掉 ——
+/// 表现就是「拖不动」而且「老是切到别的 App」，两者是同一个原因。
+/// 另外拖动期间由外层锁住分页（onScrub），否则横向拖动会被当成上下翻页。
 private struct ScrubBar: View {
     let position: Double
     let duration: Double
@@ -716,7 +771,7 @@ private struct ScrubBar: View {
 
     @State private var dragging = false
 
-    private let knob: CGFloat = 9
+    private let knob: CGFloat = 10
     private let track: CGFloat = 3
 
     var body: some View {
@@ -724,19 +779,21 @@ private struct ScrubBar: View {
             let w = max(geo.size.width, 1)
             let frac = duration > 0 ? min(max(position / duration, 0), 1) : 0
             ZStack(alignment: .leading) {
-                Capsule().fill(.white.opacity(0.28))
+                Capsule().fill(.white.opacity(0.3))
                     .frame(height: track)
                 Capsule().fill(.pink)
                     .frame(width: w * frac, height: track)
                 Circle().fill(.white)
                     .frame(width: knob, height: knob)
-                    .shadow(color: .black.opacity(0.5), radius: 2, y: 1)
+                    .shadow(color: .black.opacity(0.55), radius: 2, y: 1)
                     .offset(x: min(max(w * frac - knob / 2, 0), w - knob))
+                    .scaleEffect(dragging ? 1.3 : 1)
+                    .animation(.easeOut(duration: 0.12), value: dragging)
             }
             .frame(maxHeight: .infinity)
-            // 触摸区拉高一点，好拖（视觉上还是细的）
+            // 触摸区拉高（视觉上还是细的），并用 highPriorityGesture 抢在翻页前面
             .contentShape(Rectangle())
-            .gesture(
+            .highPriorityGesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { v in
                         if !dragging { dragging = true; onEditing(true) }
@@ -749,7 +806,7 @@ private struct ScrubBar: View {
                     }
             )
         }
-        .frame(height: 22)
+        .frame(height: 34)
     }
 }
 
