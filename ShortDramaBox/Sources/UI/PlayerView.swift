@@ -136,7 +136,11 @@ struct PlayerView: View {
             Spacer()
             Button {
                 pendingSpeed = speed
-                pendingQuality = qualityOf[current.index] ?? preferredQuality
+                // 默认选中：先看这一集实际在播的档位，再看用户偏好，最后取列表第一档；
+                // 都还没有（还在解析）就留空，面板打开后会自己补拉一次。
+                pendingQuality = qualityOf[current.index]
+                    ?? preferredQuality
+                    ?? availableOf[current.index]?.first?.definition
                 pendingEpisode = current.index
                 showPanel = true
             } label: {
@@ -158,6 +162,23 @@ struct PlayerView: View {
         }
     }
 
+    /// 面板里显示的「当前清晰度」：还在解析时也让人知道现在是什么状态
+    private var currentQualityHint: String {
+        if let q = qualityOf[current.index] { return "当前 \(q)" }
+        if let p = preferredQuality { return "当前偏好 \(p)" }
+        return "正在解析…"
+    }
+
+    /// 打开面板时若还没拿到档位列表，补拉一次，免得只能看到「正在解析…」
+    private func loadTracksForPanel() async {
+        let idx = current.index
+        if let have = availableOf[idx], !have.isEmpty { return }
+        let list = await PlayerAPI.allTracks(for: current.vid)
+        guard !list.isEmpty else { return }
+        availableOf[idx] = list
+        if pendingQuality == nil { pendingQuality = list.first?.definition }
+    }
+
     /// 选项胶囊（点选只改对勾，按「完成」才生效）
     private func chip(_ text: String, on: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -172,12 +193,14 @@ struct PlayerView: View {
         .buttonStyle(.plain)
     }
 
-    /// 清晰度胶囊：带「本机转码 / 明文源」来源标记
-    private func qualityChip(_ t: VideoTrack, on: Bool, action: @escaping () -> Void) -> some View {
+    /// 清晰度胶囊：带「本机转码 / 明文源」来源标记；正在播的那档用粉描边标出来
+    private func qualityChip(_ t: VideoTrack, on: Bool, current: Bool,
+                             action: @escaping () -> Void) -> some View {
         Button(action: action) {
             VStack(spacing: 4) {
                 HStack(spacing: 6) {
-                    Text(t.definition).font(.system(size: 14, weight: on ? .semibold : .regular))
+                    Text(t.definition)
+                        .font(.system(size: 14, weight: on || current ? .semibold : .regular))
                     if on { Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)) }
                 }
                 sourceBadge(for: t)
@@ -186,8 +209,12 @@ struct PlayerView: View {
             .padding(.horizontal, 14).padding(.vertical, 9)
             .background(on ? Color.pink : Color.secondary.opacity(0.13))
             .clipShape(RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14)
-                .stroke(on ? Color.clear : Color.secondary.opacity(0.28), lineWidth: 1))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(on ? Color.clear
+                               : (current ? Color.pink : Color.secondary.opacity(0.28)),
+                            lineWidth: current && !on ? 1.8 : 1)
+            )
         }
         .buttonStyle(.plain)
     }
@@ -235,7 +262,8 @@ struct PlayerView: View {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 10) {
                                 ForEach(availableOf[current.index] ?? [], id: \.self) { t in
-                                    qualityChip(t, on: pendingQuality == t.definition) {
+                                    qualityChip(t, on: pendingQuality == t.definition,
+                                                current: qualityOf[current.index] == t.definition) {
                                         pendingQuality = t.definition
                                     }
                                 }
@@ -245,7 +273,7 @@ struct PlayerView: View {
                         .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 0))
                     }
                 } header: {
-                    groupHead("清晰度", "「本机转码」= 源站这档 iOS 解不了，改由本机补")
+                    groupHead("清晰度", currentQualityHint)
                 } footer: {
                     Text("点选只改对勾，按「完成」才真正切换：清晰度这时才开始转码。")
                         .font(.footnote)
@@ -271,6 +299,7 @@ struct PlayerView: View {
                 }
             }
             .navigationTitle("播放设置").navigationBarTitleDisplayMode(.inline)
+            .task { await loadTracksForPanel() }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("取消") { showPanel = false }
@@ -430,6 +459,12 @@ private struct EpisodePage: View {
     @State private var duration: Double = 0
     /// 正在拖进度条
     @State private var scrubbing = false
+    /// 拖动时把显示钉在目标位置，等播放器真追上来再交还控制权；
+    /// 否则松手瞬间观察器会拿旧时间把滑块弹回去（看着就是「漂移」「和实际不符」）。
+    @State private var seekTarget: Double?
+    @State private var seekPinUntil = Date.distantPast
+    /// 拖动中限流 seek：让画面跟着手指走，但别把解码器打爆
+    @State private var lastDragSeek = Date.distantPast
     /// 开始拖动前是不是在播，松手后要接着播
     @State private var wasPlaying = false
     /// 进度条是否露出（默认藏着，点视频下方才出来）
@@ -549,6 +584,7 @@ private struct EpisodePage: View {
                             onEditing: { editing in
                                 if editing {
                                     onScrub(true)
+                                    seekTarget = nil
                                     scrubbing = true
                                     wasPlaying = (player?.rate ?? 0) > 0
                                     player?.pause()
@@ -556,6 +592,8 @@ private struct EpisodePage: View {
                                 } else {
                                     onScrub(false)
                                     let t = CMTime(seconds: position, preferredTimescale: 600)
+                                    seekTarget = position
+                                    seekPinUntil = Date().addingTimeInterval(1.5)
                                     player?.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
                                     scrubbing = false
                                     if wasPlaying {
@@ -566,7 +604,18 @@ private struct EpisodePage: View {
                                     armHide()
                                 }
                             },
-                            onSeek: { sec in position = sec })
+                            onSeek: { sec in
+                                position = sec
+                                seekTarget = sec
+                                seekPinUntil = Date().addingTimeInterval(1.5)
+                                let now = Date()
+                                if now.timeIntervalSince(lastDragSeek) > 0.1 {
+                                    lastDragSeek = now
+                                    // 零容差 = 精确到帧，拖着的时候画面会跟着手指变
+                                    player?.seek(to: CMTime(seconds: sec, preferredTimescale: 600),
+                                                 toleranceBefore: .zero, toleranceAfter: .zero)
+                                }
+                            })
                         Text(Self.clock(duration))
                             .font(.system(size: 11, weight: .medium).monospacedDigit())
                             .foregroundStyle(.white.opacity(0.8))
@@ -943,7 +992,14 @@ private struct ScrubBar: View {
                 let d = p.currentItem?.duration.seconds ?? 0
                 Task { @MainActor in
                     if d.isFinite, d > 0 { duration = d }
-                    if !scrubbing, sec.isFinite { position = sec }
+                    if let t = seekTarget, Date() < seekPinUntil {
+                        // 播放器还没追上目标位置：先显示目标，避免滑块被旧时间弹回去
+                        if abs(sec - t) < 0.35 { seekTarget = nil; position = sec }
+                        else { position = t }
+                    } else {
+                        seekTarget = nil
+                        if !scrubbing, sec.isFinite { position = sec }
+                    }
                 }
             }
 
